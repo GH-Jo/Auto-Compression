@@ -298,7 +298,7 @@ def train(epoch):
             if args.lb_mode and optimizer.param_groups[3]['lr'] != 0 :#(epoch-1) % (args.w_ep + args.t_ep) >= args.w_ep:
                 if not isinstance(bitops, (float, int)):
                     bitops = bitops.mean()
-                loss_bitops = bitops*args.scale
+                loss_bitops = bitops*args.scaling
                 loss_bitops = loss_bitops.reshape(torch.Size([]))
                 loss += loss_bitops 
                 eval_bitops_loss.update(loss_bitops.item(), inputs.size(0))
