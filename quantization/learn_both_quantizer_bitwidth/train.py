@@ -322,7 +322,7 @@ def train(epoch):
                     'Data Time: %.3f s | Model Time: %.3f s',   # \t Memory %.03fMB',
                 epoch, batch_idx * len(inputs),
                 len(train_loader.dataset),
-                eval_acc_loss.avg, eval_bitops_loss.avg if optimizer.param_groups[3]['lr'] !=0 else 0, 
+                eval_acc_loss.avg, eval_bitops_loss.avg*1e-9 if optimizer.param_groups[3]['lr'] !=0 else 0, 
                 top1.avg, top5.avg,
                 data_time - end, model_time - data_time)
             if args.cooltime and epoch != end_epoch:
@@ -409,14 +409,14 @@ def eval(epoch):
                         'L_acc: %.3cf | L_bitops: %.3f | top1.avg: %.3f%% | top5.avg: %.3f%% | ',
                     epoch, batch_idx * len(inputs),
                     len(val_loader.dataset),
-                    eval_loss.avg, eval_bitops_loss.avg, top1.avg, top5.avg)
+                    eval_loss.avg, eval_bitops_loss.avg*1e-9, top1.avg, top5.avg)
                 if args.cooltime and epoch != end_epoch:
                     print(f'> [sleep] {args.cooltime}s for cooling GPUs.. ', end='')
                     time.sleep(args.cooltime)
                     print('done.')
 
         logging.info('L_acc: %.4f | L_bitops: %.3f | top1.avg: %.3f%% | top5.avg: %.3f%%' \
-                    % (eval_loss.avg, eval_bitops_loss.avg, top1.avg, top5.avg))
+                    % (eval_loss.avg, eval_bitops_loss.avg*1e-9, top1.avg, top5.avg))
         
         # Save checkpoint.        
         is_best = False
