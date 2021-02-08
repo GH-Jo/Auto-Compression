@@ -264,6 +264,8 @@ class Q_Linear(nn.Linear):
         bitwidth = (softmask * self.bits).sum()
         return w_bar, bitwidth
 
+    
+
     def forward(self, x, cost, act_size=None):
         if len(self.bits)==1 and self.bits[0]==32:
             cost += act_size * 32 * self.computation
@@ -355,6 +357,43 @@ def initialize(model, loader, bits, act=False, weight=False, eps=0.05):
     model.cuda()
     for hook in hooks:
         hook.remove()
+
+
+def sample_search_result(model, hard=True, print=True):
+    if hard:
+        for name, module in model.named_modules():
+            if isinstance(module, (Q_Conv2d, Q_Linear, Q_ReLU, Q_Sym, Q_HSwish)):
+                idx = torch.argmax(module.theta)
+                for var in ['a', 'c', 'bits', 'n_lvs']:
+                    setattr(module, var, Parameter(getattr(module, var)[idx].view(1)))
+                module.theta=Parameter(torch.Tensor([1]))
+    else: 
+        # TODO: stochastic sampling
+        raise NotImplementedError
+
+
+def extract_bitwidth(model, weight_or_act=None):
+    if weight_or_act == "weight":
+        i = 1
+        module_set = (Q_Conv2d, Q_Linear)
+    elif weight_or_act == "act":
+        i = 2
+        module_set = (Q_ReLU, Q_Sym, Q_HSwish)
+    
+    list_select = []
+    list_prob = []
+    str_prob = ''
+    for _, m in enumerate(model.modules()):
+        if isinstance(m, module_set):
+            prob = F.softmax(m.theta)
+            list_select.append(int(m.bits[torch.argmax(prob)].item()))
+            list_prob.append(prob)
+
+            prob = [f'{i:.5f}' for i in prob.cpu().tolist()]
+            str_prob += f'layer {i} [{", ".join(prob)}]\n'
+        i += 1
+    str_select = f'{weight_or_act} bitwidth select: \n' + ", ".join(map(str, list_select))
+    return list_select, list_prob, str_select, str_prob
 
 
 class Q_Sequential(nn.Sequential):

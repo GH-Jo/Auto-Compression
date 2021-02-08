@@ -46,9 +46,10 @@ parser.add_argument('--cooltime', default=0, type=int, help='seconds for process
 parser.add_argument('--w_ep', default=1, type=int, help='')
 parser.add_argument('--t_ep', default=1, type=int, help='')
 parser.add_argument('--alternate', action="store_true")
-
-
+parser.add_argument('--retrain_path', default='', type=str, help='logged weight path to retrain')
+parser.add_argument('--fasttest', action='store_true')
 args = parser.parse_args()
+
 if args.exp == 'test':
     args.save = f'logs/{args.dataset}/{args.exp}-{time.strftime("%y%m%d-%H%M%S")}'
 else:
@@ -59,7 +60,8 @@ args.workers = 8
 args.momentum = 0.9   # momentum value
 args.decay = 1e-4 # weight decay value
 args.lb_mode = False
-args.comp_ratio = args.target_w / 32. * args.target_a / 32
+args.comp_ratio = args.target_w / 32. * args.target_a / 32.
+
 if (len(args.w_bit) > 1 or len(args.a_bit) > 1) and not args.lb_off:
     args.lb_mode = True
     print("## Learning bitwidth selection")
@@ -73,7 +75,7 @@ fh = logging.FileHandler(os.path.join(args.save, 'log.txt'))
 fh.setFormatter(logging.Formatter(log_format))
 logging.getLogger().addHandler(fh)
 
-# Argument logging ################## 
+# Argument logging ####################
 string_to_log = '==> parsed arguments.. \n'
 for key in vars(args):
     string_to_log += f'  {key} : {getattr(args, key)}\n'
@@ -88,7 +90,6 @@ if len(args.a_bit)==1:
 
 if args.lb_mode:
     print("## Learning layer-wise bitwidth.")
-
 
 
 # Device configuration
@@ -182,15 +183,30 @@ def get_bitops_total():
     _, bitops = model_(input)
 
     return bitops
- 
-print("==> Calculate target bitops..")
-bitops_first_layer= 11098128384
-bitops_total = get_bitops_total()
+
+
+def get_bitops(model_, device):
+    if args.dataset in ["cifar100", "cifar10"]:
+        input = torch.randn([1,3,32,32]).to(device)
+    else:
+        input = torch.randn([1,3,224,224]).to(device)
+    model_.eval()
+    _, bitops = model_(input)
+
+    return bitops
+
+
+print("==> Calculate bitops..")
+if args.fasttest:
+    bitops_total = 307992854528
+if not args.fasttest:
+    bitops_total = get_bitops_total()
+bitops_first_layer = 11098128384
 bitops_target = ((bitops_total - bitops_first_layer) * (args.target_w/32.) * (args.target_a/32.) +\
                  (bitops_first_layer * (args.target_w/32.)))
 logging.info(f'bitops_total : {int(bitops_total):d}')
 logging.info(f'bitops_target: {int(bitops_target):d}')
-logging.info(f'bitops_wrong : {int(bitops_total * (args.target_w/32.) * (args.target_a/32.)):d}')
+#logging.info(f'bitops_wrong : {int(bitops_total * (args.target_w/32.) * (args.target_a/32.)):d}')
 
 bitops_total *= args.bitops_scaledown
 bitops_target *= args.bitops_scaledown
@@ -229,7 +245,7 @@ def categorize_param(model):
         if name.endswith(".a") or name.endswith(".b") \
             or name.endswith(".c") or name.endswith(".d"):
             quant.append(param)
-        elif len(param.shape) == 1 and (name.endswith('weight') or  name.endswith(".bias")):
+        elif len(param.shape) == 1 and ((name.endswith('weight') or name.endswith(".bias"))):
             bnbias.append(param)
         elif name.endswith(".theta"):
             theta.append(param)
@@ -239,16 +255,54 @@ def categorize_param(model):
     return (weight, quant, bnbias, theta, skip,)
 
 
-# bitwidth Initilization
+# Bitwidth Initilization ##############################################
 with torch.no_grad():
-    print('==> weight bitwidth is set up..')
-    QuantOps.initialize(model, train_loader, args.w_bit, weight=True)
-    print('==> activation bitwidth is set up..')
-    QuantOps.initialize(model, train_loader, args.a_bit, act=True)
+    if args.retrain_path:
+        checkpoint = torch.load(args.retrain_path)
+        if "model" in checkpoint.keys():
+            checkpoint = checkpoint["model"]
+        
+        for key in checkpoint:
+            #print(key)
+            if 'conv.0.0.bits' in key:
+                num_w_bits = len(checkpoint[key])
+                break
+        for key in checkpoint:
+            if 'conv.-0.bits' in key:
+                num_a_bits = len(checkpoint[key])
+                break
+        dummy_w_bits = [i for i in range(3, 3+num_w_bits)]
+        dummy_a_bits = [i for i in range(3, 3+num_a_bits)]
+        print('==> weight bitwidth is set up..')
+        QuantOps.initialize(model, train_loader, dummy_w_bits, weight=True)
+        print('==> activation bitwidth is set up..')
+        QuantOps.initialize(model, train_loader, dummy_a_bits, act=True)
+        print('==> load searched result..')
+        model.load_state_dict(checkpoint)
+        print('==> sample search result..')
+        sample_search_result(model)
+        
+        _, _, str_sel, _ = extract_bitwidth(model, weight_or_act="weight")
+        print(str_sel)
+        _, _, str_sel, _ = extract_bitwidth(model, weight_or_act="act")
+        print(str_sel)
 
+        # TODO: get_bitops
+        model = model.to(device)
+        print(f"## sampled model bitops: {int(get_bitops(model, device).item())}")
+
+        
+    else:
+        print('==> weight bitwidth is set up..')
+        QuantOps.initialize(model, train_loader, args.w_bit, weight=True)
+        print('==> activation bitwidth is set up..')
+        QuantOps.initialize(model, train_loader, args.a_bit, act=True)
+
+model = model.to(device)
 if torch.cuda.device_count() > 1:
     print(f'==> DataParallel: device count = {torch.cuda.device_count()}')
     model = torch.nn.DataParallel(model) #, device_ids=range(torch.cuda.device_count()))
+
 
 
 # optimizer & scheduler
@@ -264,8 +318,8 @@ criterion = nn.CrossEntropyLoss()
 
 
 # Training
-def train(epoch):
-    print('train:')
+def train(epoch, phase=None):
+    print(f'[{phase}] train:')
     for i in range(len(optimizer.param_groups)):
         print(f'[epoch {epoch}] optimizer, lr{i} = {optimizer.param_groups[i]["lr"]:.6f}')
     model.train()
@@ -280,13 +334,13 @@ def train(epoch):
         if args.lb_mode and args.alternate:
             if batch_idx % 1000 == 0: # learning weight
                 optimizer.param_groups[0]['lr'] = current_lr
-                #optimizer.param_groups[1]['lr'] = current_lr * 1e-2
                 optimizer.param_groups[3]['lr'] = 0 # 0:weight  1:quant  2:bnbias  3:theta
+                # TODO: consider quantizer parameter lr
                 
             elif batch_idx % 1000 == 800: # learning theta
                 optimizer.param_groups[0]['lr'] = 0
-                #optimizer.param_groups[1]['lr'] = 0
                 optimizer.param_groups[3]['lr'] = current_lr # 0:weight  1:quant  2:bnbias  3:theta
+                # TODO: consider quantizer parameter lr
         
         inputs, targets = inputs.to(device), targets.to(device)
         data_time = time.time()
@@ -312,7 +366,6 @@ def train(epoch):
         loss.backward()
         optimizer.step()
 
-
         model_time = time.time()
         if (batch_idx) % args.log_interval == 0:
             logging.info('Train Epoch: %4d Process: %5d/%5d  ' + \
@@ -327,45 +380,19 @@ def train(epoch):
                 time.sleep(args.cooltime)
                 print('done.')
         
-
-        optimizer.param_groups[3]['lr']
         end = time.time()
     optimizer.param_groups[0]['lr'] = current_lr
     optimizer.param_groups[3]['lr'] = current_lr 
 
     if args.lb_mode:
-        i=1
-        str_to_log = '\n'
-        str_to_print = f'Epoch {epoch}, weight bitwidth selection probability: \n'
-        for _, m in enumerate(model.modules()):
-            if isinstance(m, (Q_Conv2d, Q_Linear)):
-                i += 1
-                if len(m.bits) > 1:
-                    prob_w = F.softmax(m.theta)
-                    sel=torch.argmax(prob_w)
-                    str_to_print += f'{args.w_bit[sel]}, '
-                    prob_w = [f'{i:.5f}' for i in prob_w.cpu().tolist()]
-                    str_to_log += f'layer {i} [{" ".join(prob_w)}]\n'
-        logging.info(str_to_print)
-        logging.info(str_to_log)
+        _, _, str_select, str_prob = extract_bitwidth(model, weight_or_act="weight")
+        logging.info(f'Epoch {epoch}, weight bitwidth selection \n' + \
+                      str_select + '\n'+ str_prob)
         
-        i=1
-        str_to_log = '\n'
-        str_to_print = f'Epoch {epoch}, activation bitwidth selection probability: \n'
-        for _, m in enumerate(model.modules()):
-            if isinstance(m, (Q_ReLU, Q_Sym, Q_HSwish)):
-                i += 1
-                if len(m.bits) > 1:
-                    prob_a = F.softmax(m.theta)
-                    sel=torch.argmax(prob_a)
-                    str_to_print += f'{args.a_bit[sel]} '
-                    prob_a = [f'{i:.5f}' for i in prob_a.cpu().tolist()]
-                    
-                    # TODO: more readable print
-                    str_to_log += f'layer {i} [{" ".join(prob_a)}]\n'
-        logging.info(str_to_print)
-        logging.info(str_to_log)
-
+        _, _, str_select, str_prob = extract_bitwidth(model, weight_or_act="act")
+        logging.info(f'Epoch {epoch}, activation bitwidth selection probability: \n' + \
+                      str_select + '\n'+ str_prob)
+        
     t1 = time.time()
     print(f'epoch time: {t1-t0:.3f} s')
 
@@ -427,18 +454,24 @@ def eval(epoch):
                           top1.avg, best_acc, epoch, args.save, 1, args.exp)
     
 
-
-if args.eval:
-    eval(0)
-
-else:
-    last_epoch, best_acc = resume_checkpoint(model, None, optimizer, scheduler, 
-                                    args.save, args.exp)
-    for epoch in range(last_epoch+1, end_epoch+1):
-        logging.info('Epoch: %d/%d Best_Acc: %.3f' %(epoch, end_epoch, best_acc))
-        train(epoch)
-        eval(epoch)
-        scheduler.step() 
-        
-
-logging.info('Best accuracy : {:.3f} %'.format(best_acc))
+if __name__ == '__main__':
+    if args.eval:
+        eval(0)
+    elif args.retrain_path:
+        last_epoch, best_acc = resume_checkpoint(model, None, optimizer, scheduler, 
+                                        args.save, args.exp)
+        for epoch in range(last_epoch+1, end_epoch+1):
+            logging.info('Epoch: %d/%d Best_Acc: %.3f' %(epoch, end_epoch, best_acc))
+            train(epoch, phase='Retrain' if args.retrain_path else 'Search')
+            eval(epoch)
+            scheduler.step()
+    else:
+        last_epoch, best_acc = resume_checkpoint(model, None, optimizer, scheduler, 
+                                        args.save, args.exp)
+        for epoch in range(last_epoch+1, end_epoch+1):
+            logging.info('Epoch: %d/%d Best_Acc: %.3f' %(epoch, end_epoch, best_acc))
+            train(epoch, phase='Search')
+            eval(epoch)
+            scheduler.step() 
+            
+    logging.info('Best accuracy : {:.3f} %'.format(best_acc))
