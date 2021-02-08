@@ -47,12 +47,14 @@ parser.add_argument('--w_ep', default=1, type=int, help='')
 parser.add_argument('--t_ep', default=1, type=int, help='')
 parser.add_argument('--alternate', action="store_true")
 
+
 args = parser.parse_args()
 if args.exp == 'test':
     args.save = f'logs/{args.dataset}/{args.exp}-{time.strftime("%y%m%d-%H%M%S")}'
 else:
     args.save = f'logs/{args.dataset}/{args.exp}' #-{time.strftime("%y%m%d-%H%M%S")}'
 
+args.bitops_scaledown=1e-09
 args.workers = 8
 args.momentum = 0.9   # momentum value
 args.decay = 1e-4 # weight decay value
@@ -131,6 +133,7 @@ else:
     raise NotImplementedError
 
 # calculate bitops (theta-weighted)
+'''
 def calc_bitops(model, full=False):
     a_bit_list = [32]
     w_bit_list = []
@@ -143,11 +146,11 @@ def calc_bitops(model, full=False):
             else:
                 softmask = F.gumbel_softmax(module.theta, tau=1, hard=False, dim=0)
                 a_bit_list.append((softmask * module.bits).sum())
-                '''
-                for i in range(len(softmask)):
-                    softmask[i] *= module.bits[i]
-                a_bit_list.append(sum(softmask))
-                '''
+                
+                #for i in range(len(softmask)):
+                #    softmask[i] *= module.bits[i]
+                #a_bit_list.append(sum(softmask))
+                
 
         elif isinstance(module, (Q_Conv2d, Q_Linear)):
             if isinstance(module.bits, int) :
@@ -155,15 +158,15 @@ def calc_bitops(model, full=False):
             else:
                 softmask = F.gumbel_softmax(module.theta, tau=1, hard=False, dim=0)
                 w_bit_list.append((softmask * module.bits).sum())
-                '''
-                for i in range(len(softmask)):
-                    softmask[i] *= module.bits[i]
-                w_bit_list.append(sum(softmask))
-                '''
+                
+                #for i in range(len(softmask)):
+                #    softmask[i] *= module.bits[i]
+                #w_bit_list.append(sum(softmask))
+                
             compute_list.append(module.computation)
     cost = (Tensor(a_bit_list) * Tensor(w_bit_list) * Tensor(compute_list)).sum(dim=0, keepdim=True)
     return cost
-
+'''
 
 # calculate bitops for full precision
 def get_bitops_total():
@@ -183,10 +186,14 @@ def get_bitops_total():
 print("==> Calculate target bitops..")
 bitops_first_layer= 11098128384
 bitops_total = get_bitops_total()
-bitops_target = (bitops_total-bitops_first_layer) * (args.target_w/32.) * (args.target_a/32.) + (bitops_first_layer * (args.target_w/32.))
-logging.info(f'bitops_total: {int(bitops_total*1e-9):d}')
-logging.info(f'bitops_targt: {int(bitops_target*1e-9):d}')
-logging.info(f'bitops_wrong: {int(bitops_total * (args.target_w/32.) * (args.target_a/32.)):d}')
+bitops_target = ((bitops_total - bitops_first_layer) * (args.target_w/32.) * (args.target_a/32.) +\
+                 (bitops_first_layer * (args.target_w/32.)))
+logging.info(f'bitops_total : {int(bitops_total):d}')
+logging.info(f'bitops_target: {int(bitops_target):d}')
+logging.info(f'bitops_wrong : {int(bitops_total * (args.target_w/32.) * (args.target_a/32.)):d}')
+
+bitops_total *= args.bitops_scaledown
+bitops_target *= args.bitops_scaledown
 
 
 # model
@@ -254,17 +261,13 @@ scheduler = CosineWithWarmup(optimizer,
         max_epochs=args.ft_epoch, eta_min=1e-3)
 
 criterion = nn.CrossEntropyLoss()
-#scaler = torch.cuda.amp.GradScaler()
-#model, optimizer = amp.initialize(model, optimizer, opt_level="01")
+
 
 # Training
 def train(epoch):
     print('train:')
-
     for i in range(len(optimizer.param_groups)):
         print(f'[epoch {epoch}] optimizer, lr{i} = {optimizer.param_groups[i]["lr"]:.6f}')
-
-        
     model.train()
     eval_acc_loss = AverageMeter()
     eval_bitops_loss = AverageMeter()
@@ -284,45 +287,39 @@ def train(epoch):
                 optimizer.param_groups[0]['lr'] = 0
                 #optimizer.param_groups[1]['lr'] = 0
                 optimizer.param_groups[3]['lr'] = current_lr # 0:weight  1:quant  2:bnbias  3:theta
-            
-            #if batch_idx == 2:
-            #    break
+        
         inputs, targets = inputs.to(device), targets.to(device)
         data_time = time.time()
-        with torch.cuda.amp.autocast():
-            outputs, bitops = model(inputs)
+        outputs, bitops = model(inputs)
 
-            loss = criterion(outputs, targets)
-            eval_acc_loss.update(loss.item(), inputs.size(0))
-            
-            if args.lb_mode and optimizer.param_groups[3]['lr'] != 0 :#(epoch-1) % (args.w_ep + args.t_ep) >= args.w_ep:
-                if not isinstance(bitops, (float, int)):
-                    bitops = bitops.mean()
-                loss_bitops = bitops*args.scaling
-                loss_bitops = loss_bitops.reshape(torch.Size([]))
-                loss += loss_bitops 
-                eval_bitops_loss.update(loss_bitops.item(), inputs.size(0))
+        loss = criterion(outputs, targets)
+        eval_acc_loss.update(loss.item(), inputs.size(0))
+        
+        if args.lb_mode and optimizer.param_groups[3]['lr'] != 0 :#(epoch-1) % (args.w_ep + args.t_ep) >= args.w_ep:
+            if not isinstance(bitops, (float, int)):
+                bitops = bitops.mean()
+            bitops *= args.bitops_scaledown 
+            loss_bitops = bitops * args.scaling
+            loss_bitops = loss_bitops.reshape(torch.Size([]))
+            loss += loss_bitops 
+            eval_bitops_loss.update(loss_bitops.item(), inputs.size(0))
 
-            acc1, acc5 = accuracy(outputs.data, targets.data, top_k=(1,5))
-            top1.update(acc1[0], inputs.size(0))
-            top5.update(acc5[0], inputs.size(0))
+        acc1, acc5 = accuracy(outputs.data, targets.data, top_k=(1,5))
+        top1.update(acc1[0], inputs.size(0))
+        top5.update(acc5[0], inputs.size(0))
         
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        #scaler.scale(loss).backward()
-        #scaler.unscale_(optimizer)
-        #scaler.step(optimizer)
-        #scaler.update()
+
 
         model_time = time.time()
         if (batch_idx) % args.log_interval == 0:
             logging.info('Train Epoch: %4d Process: %5d/%5d  ' + \
                     'L_acc: %.3f | L_bitops: %.3f | top1.avg: %.3f%% | top5.avg: %.3f%% | ' +  \
                     'Data Time: %.3f s | Model Time: %.3f s',   # \t Memory %.03fMB',
-                epoch, batch_idx * len(inputs),
-                len(train_loader.dataset),
-                eval_acc_loss.avg, eval_bitops_loss.avg*1e-9 if optimizer.param_groups[3]['lr'] !=0 else 0, 
+                epoch, batch_idx * len(inputs), len(train_loader.dataset),
+                eval_acc_loss.avg, eval_bitops_loss.avg if optimizer.param_groups[3]['lr'] !=0 else 0, 
                 top1.avg, top5.avg,
                 data_time - end, model_time - data_time)
             if args.cooltime and epoch != end_epoch:
@@ -377,7 +374,7 @@ def eval(epoch):
     print('eval:')
     global best_acc
     model.eval()
-    eval_loss = AverageMeter()
+    eval_acc_loss = AverageMeter()
     eval_bitops_loss = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
@@ -388,35 +385,37 @@ def eval(epoch):
 
             outputs, bitops = model(inputs)
             loss = criterion(outputs, targets)
+            eval_acc_loss.update(loss.item(), inputs.size(0))
+
             if args.lb_mode:
-                #bitops = calc_bitops(model)
                 if not isinstance(bitops, (float, int)):
-                    loss_bitops = bitops*args.scaling*1e-9
-                if (batch_idx) % (args.log_interval*5) == 0:
-                    logging.info(f'bitops_target:   {bitops_target*1e-9}')
-                    logging.info(f'evalaution time bitops: {bitops*1e-9}')
+                    bitops = bitops.mean()
+                bitops *= args.bitops_scaledown 
+                loss_bitops = bitops * args.scaling 
                 loss_bitops = loss_bitops.reshape(torch.Size([]))
                 loss += loss_bitops 
                 eval_bitops_loss.update(loss_bitops.item(), inputs.size(0))
+                if (batch_idx) % (args.log_interval*5) == 0:
+                    logging.info(f'bitops_target:   {bitops_target}')
+                    logging.info(f'evalaution time bitops: {bitops}')
 
             acc1, acc5 = accuracy(outputs.data, targets.data, top_k=(1,5))
-            eval_loss.update(loss.item(), inputs.size(0))
+            
             top1.update(acc1[0], inputs.size(0))
             top5.update(acc5[0], inputs.size(0))
 
             if (batch_idx) % args.log_interval == 0:
                 logging.info('Train Epoch: %4d Process: %5d/%5d  ' + \
-                        'L_acc: %.3cf | L_bitops: %.3f | top1.avg: %.3f%% | top5.avg: %.3f%% | ',
-                    epoch, batch_idx * len(inputs),
-                    len(val_loader.dataset),
-                    eval_loss.avg, eval_bitops_loss.avg*1e-9, top1.avg, top5.avg)
+                        'L_acc: %.3f | L_bitops: %.3f | top1.avg: %.3f%% | top5.avg: %.3f%% | ',
+                    epoch, batch_idx * len(inputs), len(val_loader.dataset),
+                    eval_acc_loss.avg, eval_bitops_loss.avg, top1.avg.item(), top5.avg.item())
                 if args.cooltime and epoch != end_epoch:
                     print(f'> [sleep] {args.cooltime}s for cooling GPUs.. ', end='')
                     time.sleep(args.cooltime)
                     print('done.')
 
         logging.info('L_acc: %.4f | L_bitops: %.3f | top1.avg: %.3f%% | top5.avg: %.3f%%' \
-                    % (eval_loss.avg, eval_bitops_loss.avg*1e-9, top1.avg, top5.avg))
+                    % (eval_acc_loss.avg, eval_bitops_loss.avg*1e-9, top1.avg, top5.avg))
         
         # Save checkpoint.        
         is_best = False
