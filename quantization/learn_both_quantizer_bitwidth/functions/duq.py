@@ -21,6 +21,7 @@ class RoundQuant(torch.autograd.Function):
     def backward(ctx, grad_output):
         return grad_output, None
 
+
 """
 @inproceedings{
     esser2020learned,
@@ -143,6 +144,7 @@ class Q_Sym(nn.Module):
             act_size = (softmask * self.bits).sum()
             return x_bar, act_size
 
+
 ################## didn't modify Q_HSwish #################
 class Q_HSwish(nn.Module):
     def __init__(self, act_func=True):
@@ -260,7 +262,7 @@ class Q_Linear(nn.Linear):
         w_bar = torch.zeros_like(self.weight)
         for i, n_lv in enumerate(self.n_lvs):
             weight = F.hardtanh(self.weight / a[i], -1, 1)                
-            w_bar = torch.add(w_bar, RoundQuant.apply(weight, n_lv//2) * c[i] * softmask[i])
+            w_bar = torch.add(w_bar, RoundQuant.apply(weight, n_lv // 2) * c[i] * softmask[i])
         bitwidth = (softmask * self.bits).sum()
         return w_bar, bitwidth
 

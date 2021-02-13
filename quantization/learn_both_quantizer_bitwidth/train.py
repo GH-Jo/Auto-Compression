@@ -48,6 +48,7 @@ parser.add_argument('--t_ep', default=1, type=int, help='')
 parser.add_argument('--alternate', action="store_true")
 parser.add_argument('--retrain_path', default='', type=str, help='logged weight path to retrain')
 parser.add_argument('--fasttest', action='store_true')
+parser.add_argument('--grad_scale', action='store_true')
 args = parser.parse_args()
 
 if args.exp == 'test':
@@ -55,7 +56,7 @@ if args.exp == 'test':
 else:
     args.save = f'logs/{args.dataset}/{args.exp}' #-{time.strftime("%y%m%d-%H%M%S")}'
 
-args.bitops_scaledown=1e-09
+#args.bitops_scaledown=1e-09
 args.workers = 8
 args.momentum = 0.9   # momentum value
 args.decay = 1e-4 # weight decay value
@@ -112,7 +113,10 @@ train_loader, val_loader = data_loader(args.dir, args.dataset, args.batchsize, a
 
 print('==> Building Model..')
 # QuantOps
-if args.quant_op == "duq":
+if args.grad_scale:
+    from functions.duq_gscale import *
+    print("==> duq with grad_scale is selected..")
+elif args.quant_op == "duq":
     from functions.duq import *
     print("==> differentiable and unified quantization method is selected..")
 elif args.quant_op == "qil":
@@ -132,42 +136,6 @@ elif args.quant_op == 'duq_init_change':
     from functions.duq_init_change import *
 else:
     raise NotImplementedError
-
-# calculate bitops (theta-weighted)
-'''
-def calc_bitops(model, full=False):
-    a_bit_list = [32]
-    w_bit_list = []
-    compute_list = []
-
-    for module in model.modules():
-        if isinstance(module, (Q_ReLU, Q_Sym, Q_HSwish)):
-            if isinstance(module.bits, int) :
-                a_bit_list.append(module.bits)
-            else:
-                softmask = F.gumbel_softmax(module.theta, tau=1, hard=False, dim=0)
-                a_bit_list.append((softmask * module.bits).sum())
-                
-                #for i in range(len(softmask)):
-                #    softmask[i] *= module.bits[i]
-                #a_bit_list.append(sum(softmask))
-                
-
-        elif isinstance(module, (Q_Conv2d, Q_Linear)):
-            if isinstance(module.bits, int) :
-                w_bit_list.append(module.bits)
-            else:
-                softmask = F.gumbel_softmax(module.theta, tau=1, hard=False, dim=0)
-                w_bit_list.append((softmask * module.bits).sum())
-                
-                #for i in range(len(softmask)):
-                #    softmask[i] *= module.bits[i]
-                #w_bit_list.append(sum(softmask))
-                
-            compute_list.append(module.computation)
-    cost = (Tensor(a_bit_list) * Tensor(w_bit_list) * Tensor(compute_list)).sum(dim=0, keepdim=True)
-    return cost
-'''
 
 # calculate bitops for full precision
 def get_bitops_total():
@@ -208,8 +176,8 @@ logging.info(f'bitops_total : {int(bitops_total):d}')
 logging.info(f'bitops_target: {int(bitops_target):d}')
 #logging.info(f'bitops_wrong : {int(bitops_total * (args.target_w/32.) * (args.target_a/32.)):d}')
 
-bitops_total *= args.bitops_scaledown
-bitops_target *= args.bitops_scaledown
+#bitops_total *= args.bitops_scaledown
+#bitops_target *= args.bitops_scaledown
 
 
 # model
@@ -222,12 +190,14 @@ else:
     raise NotImplementedError
 model = model.to(device)
 
+lr_quant = args.lr if args.grad_scale else args.lr * 1e-2
 # optimizer -> for further coding (got from PROFIT)
 def get_optimizer(params, train_weight, train_quant, train_bnbias, train_theta):
+    global lr_quant
     (weight, quant, bnbias, theta, skip) = params
     optimizer = optim.SGD([
         {'params': weight, 'weight_decay': args.decay, 'lr': args.lr  if train_weight else 0},
-        {'params': quant, 'weight_decay': 0., 'lr': args.lr if train_quant else 0},
+        {'params': quant, 'weight_decay': 0., 'lr': lr_quant if train_quant else 0},
         {'params': bnbias, 'weight_decay': 0., 'lr': args.lr if train_bnbias else 0},
         {'params': theta, 'weight_decay': 0., 'lr': args.lr if train_theta else 0},
         {'params': skip, 'weight_decay': 0, 'lr': 0},
@@ -334,14 +304,19 @@ def train(epoch, phase=None):
         if args.lb_mode and args.alternate:
             if batch_idx % 1000 == 0: # learning weight
                 optimizer.param_groups[0]['lr'] = current_lr
-                optimizer.param_groups[3]['lr'] = 0 # 0:weight  1:quant  2:bnbias  3:theta
+                optimizer.param_groups[1]['lr'] = current_lr if args.grad_scale else current_lr * 1e-2
+                optimizer.param_groups[3]['lr'] = 0   # 0:weight  1:quant  2:bnbias  3:theta
                 # TODO: consider quantizer parameter lr
                 
             elif batch_idx % 1000 == 800: # learning theta
                 optimizer.param_groups[0]['lr'] = 0
-                optimizer.param_groups[3]['lr'] = current_lr # 0:weight  1:quant  2:bnbias  3:theta
+                optimizer.param_groups[1]['lr'] = 0
+                optimizer.param_groups[3]['lr'] = current_lr  # 0:weight  1:quant  2:bnbias  3:theta
                 # TODO: consider quantizer parameter lr
         
+        if batch_idx > 202:
+            break
+
         inputs, targets = inputs.to(device), targets.to(device)
         data_time = time.time()
         outputs, bitops = model(inputs)
@@ -352,7 +327,7 @@ def train(epoch, phase=None):
         if args.lb_mode and optimizer.param_groups[3]['lr'] != 0 :#(epoch-1) % (args.w_ep + args.t_ep) >= args.w_ep:
             if not isinstance(bitops, (float, int)):
                 bitops = bitops.mean()
-            bitops *= args.bitops_scaledown 
+            #print(bitops)
             loss_bitops = bitops * args.scaling
             loss_bitops = loss_bitops.reshape(torch.Size([]))
             loss += loss_bitops 
@@ -417,7 +392,6 @@ def eval(epoch):
             if args.lb_mode:
                 if not isinstance(bitops, (float, int)):
                     bitops = bitops.mean()
-                bitops *= args.bitops_scaledown 
                 loss_bitops = bitops * args.scaling 
                 loss_bitops = loss_bitops.reshape(torch.Size([]))
                 loss += loss_bitops 
