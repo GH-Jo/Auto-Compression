@@ -314,9 +314,6 @@ def train(epoch, phase=None):
                 optimizer.param_groups[3]['lr'] = current_lr  # 0:weight  1:quant  2:bnbias  3:theta
                 # TODO: consider quantizer parameter lr
         
-        if batch_idx > 202:
-            break
-
         inputs, targets = inputs.to(device), targets.to(device)
         data_time = time.time()
         outputs, bitops = model(inputs)

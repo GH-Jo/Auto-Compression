@@ -42,7 +42,7 @@ class Q_ReLU(nn.Module):
     def __init__(self, act_func=True, inplace=False):
         super(Q_ReLU, self).__init__()
         self.n_lvs = [1]
-        self.bits = [32] #Parameter(Tensor([32]), requires_grad=False)
+        self.bits = [32]
         self.act_func = act_func
         self.inplace = inplace
         self.a = Parameter(Tensor(1))
@@ -52,8 +52,6 @@ class Q_ReLU(nn.Module):
     def initialize(self, bits, offset, diff):
         self.bits = Parameter(Tensor(bits), requires_grad=False)
         self.n_lvs = 2 ** self.bits
-        '''self.bits = bits
-        self.n_lvs = [2**i for i in bits]'''
         self.a = Parameter(Tensor(len(self.bits)))
         self.c = Parameter(Tensor(len(self.bits)))
 
@@ -68,10 +66,8 @@ class Q_ReLU(nn.Module):
         if len(self.bits)==1 and self.bits[0]==32:
             return x, 32
         else:
-
-            g = 1.0 / torch.sqrt(x.numel() * (self.n_lvs - 1)).to(x.device)
-            a = F.softplus(grad_scale(self.a, g))
-            c = F.softplus(grad_scale(self.c, g))
+            a = F.softplus(self.a)
+            c = F.softplus(self.c)
 
             # 1) for loop
             softmask = F.gumbel_softmax(self.theta, tau=1, hard=False, dim=0)
@@ -92,8 +88,6 @@ class Q_ReLU6(Q_ReLU):
     def initialize(self, bits, offset, diff):
         self.bits = Parameter(Tensor(bits), requires_grad=False)
         self.n_lvs = 2 ** self.bits
-        '''self.bits = bits
-        self.n_lvs = [2**i for i in bits]'''
         self.a = Parameter(Tensor(len(self.bits)))
         self.c = Parameter(Tensor(len(self.bits)))
         self.theta = Parameter(torch.ones(len(self.n_lvs))/len(self.n_lvs))
@@ -118,8 +112,6 @@ class Q_Sym(nn.Module):
     def initialize(self, bits, offset, diff):
         self.bits = Parameter(Tensor(bits), requires_grad=False)
         self.n_lvs = 2 ** self.bits
-        #self.bits = bits
-        #self.n_lvs = [2**i for i in bits]
         self.a = Parameter(Tensor(len(self.bits)))
         self.c = Parameter(Tensor(len(self.bits)))
 
@@ -150,7 +142,7 @@ class Q_HSwish(nn.Module):
     def __init__(self, act_func=True):
         super(Q_HSwish, self).__init__()
         self.n_lvs = [1]
-        self.bits = [32]#Parameter(Tensor([32]), requires_grad=False)
+        self.bits = [32]
         self.act_func = act_func
         self.a = Parameter(Tensor(1))
         self.b = 3/8
@@ -182,7 +174,7 @@ class Q_Conv2d(nn.Conv2d):
     def __init__(self, *args, **kargs):
         super(Q_Conv2d, self).__init__(*args, **kargs)
         self.n_lvs = [1]
-        self.bits = [32] #Parameter(Tensor([32]), requires_grad=False)
+        self.bits = [32]
         self.a = Parameter(Tensor(1))
         self.c = Parameter(Tensor(1))
         self.weight_old = None
@@ -204,9 +196,8 @@ class Q_Conv2d(nn.Conv2d):
         self.c.data.fill_(np.log(np.exp(max_val * 0.9)-1))
 
     def _weight_quant(self):
-        g = 1.0 / torch.sqrt(self.weight.numel() * (self.n_lvs // 2 - 1)).to(self.weight.device)
-        a = F.softplus(grad_scale(self.a, g))
-        c = F.softplus(grad_scale(self.c, g))
+        a = F.softplus(self.a)
+        c = F.softplus(self.c)
         
         softmask = F.gumbel_softmax(self.theta, tau=1, hard=False, dim=0)
         w_bar = torch.zeros_like(self.weight)
@@ -233,7 +224,7 @@ class Q_Linear(nn.Linear):
     def __init__(self, *args, **kargs):
         super(Q_Linear, self).__init__(*args, **kargs)
         self.n_lvs = [0]
-        self.bits = [32]#Parameter(Tensor([32]), requires_grad=False)
+        self.bits = [32]
         self.a = Parameter(Tensor(1))
         self.c = Parameter(Tensor(1))
         self.weight_old = None
@@ -254,9 +245,8 @@ class Q_Linear(nn.Linear):
         self.c.data.fill_(np.log(np.exp(max_val * 0.9)-1))
 
     def _weight_quant(self):
-        g = 1.0 / torch.sqrt(self.weight.numel() * (self.n_lvs // 2 - 1)).to(self.weight.device)
-        a = F.softplus(grad_scale(self.a, g))
-        c = F.softplus(grad_scale(self.c, g))
+        a = F.softplus(self.a)
+        c = F.softplus(self.c)
 
         softmask = F.gumbel_softmax(self.theta, tau=1, hard=False, dim=0)
         w_bar = torch.zeros_like(self.weight)
@@ -366,9 +356,11 @@ def sample_search_result(model, hard=True, print=True):
         for name, module in model.named_modules():
             if isinstance(module, (Q_Conv2d, Q_Linear, Q_ReLU, Q_Sym, Q_HSwish)):
                 idx = torch.argmax(module.theta)
-                for var in ['a', 'c', 'bits', 'n_lvs']:
+                for var in ['a', 'c']:
                     setattr(module, var, Parameter(getattr(module, var)[idx].view(1)))
-                module.theta=Parameter(torch.Tensor([1]))
+                for var in ['bits', 'n_lvs']:
+                    setattr(module, var, Parameter(getattr(module, var)[idx].view(1), requires_grad=False))
+                module.theta=Parameter(torch.Tensor([1]), requires_grad=False)
     else: 
         # TODO: stochastic sampling
         raise NotImplementedError
