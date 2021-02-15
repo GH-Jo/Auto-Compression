@@ -123,9 +123,8 @@ class Q_Sym(nn.Module):
         if len(self.bits)==1 and self.bits[0]==32:
             return x, 32
         else:
-            g = 1.0 / torch.sqrt(x.numel() * (self.n_lvs // 2 - 1)).to(x.device)
-            a = F.softplus(grad_scale(self.a, g))
-            c = F.softplus(grad_scale(self.c, g))
+            a = F.softplus(self.a)
+            c = F.softplus(self.c)
             
             softmask = F.gumbel_softmax(self.theta, tau=1, hard=False, dim=0)
             softmask = softmask
