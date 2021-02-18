@@ -34,11 +34,12 @@ parser.add_argument('--seed', default=7, type=int, help='random seed')
 parser.add_argument("--quant_op", required=True)
 
 #parser.add_argument('--comp_ratio', default=1, type=float, help='set target compression ratio of Bitops loss')
-parser.add_argument('--target_w', default=4, type=float, help='set target weight bitwidth')
-parser.add_argument('--target_a', default=4, type=float, help='set target activation bitwidth')
-parser.add_argument('--scaling', default=1e-6, type=float, help='set FLOPs loss scaling factor')
+parser.add_argument('--w_target_bit', default=4, type=float, help='set target weight bitwidth')
+parser.add_argument('--a_target_bit', default=4, type=float, help='set target activation bitwidth')
 parser.add_argument('--w_bit', default=[32], type=int, nargs='+', help='set weight bits')
 parser.add_argument('--a_bit', default=[32], type=int, nargs='+', help='set activation bits')
+parser.add_argument('--scaling', default=1e-6, type=float, help='set FLOPs loss scaling factor')
+
 
 parser.add_argument('--eval', action='store_true', help='evaluation mode')
 parser.add_argument('--lb_off', '-lboff', action='store_true', help='learn bitwidth (dnas approach)')
@@ -61,7 +62,7 @@ args.workers = 8
 args.momentum = 0.9   # momentum value
 args.decay = 1e-4 # weight decay value
 args.lb_mode = False
-args.comp_ratio = args.target_w / 32. * args.target_a / 32.
+args.comp_ratio = args.w_target_bit / 32. * args.a_target_bit / 32.
 
 if (len(args.w_bit) > 1 or len(args.a_bit) > 1) and not args.lb_off:
     args.lb_mode = True
@@ -90,7 +91,7 @@ if len(args.a_bit)==1:
     print("## Fixed bitwidth for activation")
 
 if args.lb_mode:
-    print("## Learning layer-wise bitwidth.")
+    logging.info("## Learning layer-wise bitwidth.")
 
 
 # Device configuration
@@ -170,11 +171,11 @@ if args.fasttest:
 if not args.fasttest:
     bitops_total = get_bitops_total()
 bitops_first_layer = 11098128384
-bitops_target = ((bitops_total - bitops_first_layer) * (args.target_w/32.) * (args.target_a/32.) +\
-                 (bitops_first_layer * (args.target_w/32.)))
+bitops_target = ((bitops_total - bitops_first_layer) * (args.w_target_bit/32.) * (args.a_target_bit/32.) +\
+                 (bitops_first_layer * (args.w_target_bit/32.)))
 logging.info(f'bitops_total : {int(bitops_total):d}')
 logging.info(f'bitops_target: {int(bitops_target):d}')
-#logging.info(f'bitops_wrong : {int(bitops_total * (args.target_w/32.) * (args.target_a/32.)):d}')
+#logging.info(f'bitops_wrong : {int(bitops_total * (args.w_target_bit/32.) * (args.a_target_bit/32.)):d}')
 
 #bitops_total *= args.bitops_scaledown
 #bitops_target *= args.bitops_scaledown
@@ -259,7 +260,7 @@ with torch.no_grad():
 
         # TODO: get_bitops
         model = model.to(device)
-        print(f"## sampled model bitops: {int(get_bitops(model, device).item())}")
+        logging.info(f"## sampled model bitops: {int(get_bitops(model, device).item())}")
 
         
     else:
@@ -289,9 +290,9 @@ criterion = nn.CrossEntropyLoss()
 
 # Training
 def train(epoch, phase=None):
-    print(f'[{phase}] train:')
+    logging.info(f'[{phase}] train:')
     for i in range(len(optimizer.param_groups)):
-        print(f'[epoch {epoch}] optimizer, lr{i} = {optimizer.param_groups[i]["lr"]:.6f}')
+        logging.info(f'[epoch {epoch}] optimizer, lr{i} = {optimizer.param_groups[i]["lr"]:.6f}')
     model.train()
     eval_acc_loss = AverageMeter()
     eval_bitops_loss = AverageMeter()
