@@ -1,22 +1,24 @@
-import torch
-import torch.nn as nn
-import torch.nn.parallel
-import torch.optim as optim
-import torch.nn.functional as F
-import numpy as np
-import os
 import argparse
+import locale
+import logging
+import os
 import random
 import time
-import logging
-import locale
+import copy
 
-from models import *
-from utils import *
-from functions import *
-from torch.autograd import Variable
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.nn.parallel
+import torch.optim as optim
 from torch import Tensor
+from torch.autograd import Variable
+
+from functions import *
+from models import *
 from models.MobileNetV2_quant import mobilenet_v2
+from utils import *
 
 parser = argparse.ArgumentParser(description='PyTorch - Learning Quantization')
 parser.add_argument('--model', default='mobilenetv2', help='select model')
@@ -48,6 +50,9 @@ parser.add_argument('--w_ep', default=1, type=int, help='')
 parser.add_argument('--t_ep', default=1, type=int, help='')
 parser.add_argument('--alternate', action="store_true")
 parser.add_argument('--retrain_path', default='', type=str, help='logged weight path to retrain')
+parser.add_argument('--retrain_type', default=1, type=int, help='1: init weight using searched net\n'\
+                                                            '2: init weight using pretrained\n'\
+                                                            '3: init weight using searched net, reinit quantizer')
 parser.add_argument('--fasttest', action='store_true')
 parser.add_argument('--grad_scale', action='store_true')
 args = parser.parse_args()
@@ -222,12 +227,12 @@ def categorize_param(model):
             theta.append(param)
         else:
             weight.append(param)
-
     return (weight, quant, bnbias, theta, skip,)
 
 
-# Bitwidth Initilization ##############################################
+# Bitwidth Initilization 
 with torch.no_grad():
+    # Retraining based on searched bitwidths
     if args.retrain_path:
         checkpoint = torch.load(args.retrain_path)
         if "model" in checkpoint.keys():
@@ -244,30 +249,66 @@ with torch.no_grad():
                 break
         dummy_w_bits = [i for i in range(3, 3+num_w_bits)]
         dummy_a_bits = [i for i in range(3, 3+num_a_bits)]
-        print('==> weight bitwidth is set up..')
-        QuantOps.initialize(model, train_loader, dummy_w_bits, weight=True)
-        print('==> activation bitwidth is set up..')
-        QuantOps.initialize(model, train_loader, dummy_a_bits, act=True)
-        print('==> load searched result..')
-        model.load_state_dict(checkpoint)
-        print('==> sample search result..')
-        sample_search_result(model)
+
+        if args.retrain_type == 1:
+            logging.info('[Retraining type 1] sample weight and quantizer parameter from bitsearch result')
+            print('==> weight bitwidth is set up..')
+            QuantOps.initialize(model, train_loader, dummy_w_bits, weight=True)
+            print('==> activation bitwidth is set up..')
+            QuantOps.initialize(model, train_loader, dummy_a_bits, act=True)
+
+            print('==> load searched result..')
+            model.load_state_dict(checkpoint)
+            print('==> sample search result..')
+            sample_search_result(model)
         
+        elif args.retrain_type == 2:
+            logging.info('[Retraining type 2] load weight from pretrained model, and just change bitwidths')
+            print('==> Initialize for main model..')
+            QuantOps.initialize(model, train_loader, dummy_w_bits[0], weight=True)
+            QuantOps.initialize(model, train_loader, dummy_a_bits[0], act=True)
+            
+            model2 = copy.deepcopy(model) 
+            print('==> Initialize for auxilary model..')
+            QuantOps.initialize(model2, train_loader, dummy_w_bits, weight=True)
+            QuantOps.initialize(model2, train_loader, dummy_a_bits, act=True)
+            model2.load_state_dict(checkpoint)
+            
+            print('==> Sample search result..')
+            sample_search_result(model2)
+            print('==> Transfer searched result to main model..')
+            transfer_bitwidth(model2, model)
+            del(model2)
+
+        elif args.retrain_type == 3:
+            logging.info('[Retraining type 3] sample weight from bitsearch result, and reinitialize a and c')
+            print('==> Initialize for main model..')
+            QuantOps.initialize(model, train_loader, dummy_w_bits, weight=True)
+            QuantOps.initialize(model, train_loader, dummy_a_bits, act=True)
+            model.load_state_dict(checkpoint)
+
+            print('==> Sample search result..')
+            sample_search_result(model)
+            model = model.to(device)
+            QuantOps.initialize_quantizer(model, train_loader)
+
+        # ---- Variable interval (end) ---------------------------
         _, _, str_sel, _ = extract_bitwidth(model, weight_or_act="weight")
         print(str_sel)
         _, _, str_sel, _ = extract_bitwidth(model, weight_or_act="act")
         print(str_sel)
 
-        # TODO: get_bitops
         model = model.to(device)
         logging.info(f"## sampled model bitops: {int(get_bitops(model, device).item())}")
 
-        
+    
+    # Bitwidth searching or uniform QAT
     else:
         print('==> weight bitwidth is set up..')
         QuantOps.initialize(model, train_loader, args.w_bit, weight=True)
         print('==> activation bitwidth is set up..')
         QuantOps.initialize(model, train_loader, args.a_bit, act=True)
+
 
 model = model.to(device)
 if torch.cuda.device_count() > 1:
@@ -365,7 +406,7 @@ def train(epoch, phase=None):
                       str_select + '\n'+ str_prob)
         
     t1 = time.time()
-    print(f'epoch time: {t1-t0:.3f} s')
+    logging.info(f'epoch time: {t1-t0:.3f} s')
 
 
 def eval(epoch):
@@ -431,7 +472,7 @@ if __name__ == '__main__':
                                         args.save, args.exp)
         for epoch in range(last_epoch+1, end_epoch+1):
             logging.info('Epoch: %d/%d Best_Acc: %.3f' %(epoch, end_epoch, best_acc))
-            train(epoch, phase='Retrain' if args.retrain_path else 'Search')
+            train(epoch, phase='Retrain')
             eval(epoch)
             scheduler.step()
     else:

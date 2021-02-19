@@ -59,6 +59,10 @@ class Q_ReLU(nn.Module):
         self.a.data.fill_(np.log(np.exp(offset + diff)-1))
         self.c.data.fill_(np.log(np.exp(offset + diff)-1))
     
+    def initialize_qonly(self, offset, diff):
+        self.a.data.fill_(np.log(np.exp(offset + diff)-1))
+        self.c.data.fill_(np.log(np.exp(offset + diff)-1))
+    
     def forward(self, x):
         if self.act_func:
             x = F.relu(x, self.inplace)
@@ -99,6 +103,14 @@ class Q_ReLU6(Q_ReLU):
             self.a.data.fill_(np.log(np.exp(offset + diff)-1))
             self.c.data.fill_(np.log(np.exp(offset + diff)-1))
 
+    def initialize_qonly(self, offset, diff):
+        if offset + diff > 6:
+            self.a.data.fill_(np.log(np.exp(6)-1))
+            self.c.data.fill_(np.log(np.exp(6)-1))
+        else:
+            self.a.data.fill_(np.log(np.exp(offset + diff)-1))
+            self.c.data.fill_(np.log(np.exp(offset + diff)-1))
+
 
 class Q_Sym(nn.Module):
     def __init__(self):
@@ -116,6 +128,10 @@ class Q_Sym(nn.Module):
         self.c = Parameter(Tensor(len(self.bits)))
 
         self.theta = Parameter(torch.ones(len(self.bits))/len(self.bits))
+        self.a.data.fill_(np.log(np.exp(offset + diff)-1))
+        self.c.data.fill_(np.log(np.exp(offset + diff)-1))
+    
+    def initialize_qonly(self, offset, diff):
         self.a.data.fill_(np.log(np.exp(offset + diff)-1))
         self.c.data.fill_(np.log(np.exp(offset + diff)-1))
 
@@ -169,6 +185,7 @@ class Q_HSwish(nn.Module):
             return x 
 ##########################################################
 
+
 class Q_Conv2d(nn.Conv2d):
     def __init__(self, *args, **kargs):
         super(Q_Conv2d, self).__init__(*args, **kargs)
@@ -183,13 +200,15 @@ class Q_Conv2d(nn.Conv2d):
     def initialize(self, bits):
         self.bits = Parameter(Tensor(bits), requires_grad=False)
         self.n_lvs = 2 ** self.bits
-        
-        '''self.bits = bits
-        #self.n_lvs = [2**i for i in bits]'''
         self.a = Parameter(Tensor(len(self.bits)))
         self.c = Parameter(Tensor(len(self.bits)))
         
         self.theta = Parameter(torch.ones(len(self.bits))/len(self.bits))
+        max_val = self.weight.data.abs().max().item()
+        self.a.data.fill_(np.log(np.exp(max_val * 0.9)-1))
+        self.c.data.fill_(np.log(np.exp(max_val * 0.9)-1))
+
+    def initialize_qonly(self):
         max_val = self.weight.data.abs().max().item()
         self.a.data.fill_(np.log(np.exp(max_val * 0.9)-1))
         self.c.data.fill_(np.log(np.exp(max_val * 0.9)-1))
@@ -203,6 +222,9 @@ class Q_Conv2d(nn.Conv2d):
         for i, n_lv in enumerate(self.n_lvs):
             weight = F.hardtanh(self.weight / a[i], -1, 1)
             w_bar = torch.add(w_bar, RoundQuant.apply(weight, n_lv // 2) * c[i] * softmask[i])
+        #print('softmask.device: ',softmask.device)
+        #print('self.bits.device: ',self.bits.device)
+        
         bitwidth = (softmask * self.bits).sum()
 
         return w_bar, bitwidth
@@ -233,12 +255,15 @@ class Q_Linear(nn.Linear):
     def initialize(self, bits):
         self.bits = Parameter(Tensor(bits), requires_grad=False)
         self.n_lvs = 2 ** self.bits
-        '''self.bits = bits
-        self.n_lvs = [2**i for i in bits]'''
         self.a = Parameter(Tensor(len(self.bits)))
         self.c = Parameter(Tensor(len(self.bits)))
 
         self.theta = Parameter(torch.ones(len(self.bits))/len(self.bits))
+        max_val = self.weight.data.abs().max().item()
+        self.a.data.fill_(np.log(np.exp(max_val * 0.9)-1))
+        self.c.data.fill_(np.log(np.exp(max_val * 0.9)-1))
+    
+    def initialize_qonly(self):
         max_val = self.weight.data.abs().max().item()
         self.a.data.fill_(np.log(np.exp(max_val * 0.9)-1))
         self.c.data.fill_(np.log(np.exp(max_val * 0.9)-1))
@@ -254,7 +279,6 @@ class Q_Linear(nn.Linear):
             w_bar = torch.add(w_bar, RoundQuant.apply(weight, n_lv // 2) * c[i] * softmask[i])
         bitwidth = (softmask * self.bits).sum()
         return w_bar, bitwidth
-
     
 
     def forward(self, x, cost, act_size=None):
@@ -288,7 +312,6 @@ class Q_Conv2dPad(Q_Conv2d):
 
             return F.conv2d(inputs, weight, self.bias,
                 self.stride, 0, self.dilation, self.groups)
-
 
 
 def initialize(model, loader, bits, act=False, weight=False, eps=0.05):
@@ -330,13 +353,11 @@ def initialize(model, loader, bits, act=False, weight=False, eps=0.05):
             module.computation = O * I
 
     hooks = []
-
     for name, module in model.named_modules():
         hook = module.register_forward_hook(initialize_hook)
         hooks.append(hook)
 
     model.train()
-
     for i, (input, target) in enumerate(loader):
         with torch.no_grad():
             if isinstance(model, nn.DataParallel):
@@ -389,6 +410,61 @@ def extract_bitwidth(model, weight_or_act=None):
     return list_select, list_prob, str_select, str_prob
 
 
+def initialize_quantizer(model, loader, eps=0.05):
+    def initialize_hook(module, input, output):
+        if isinstance(module, (Q_ReLU, Q_Sym, Q_HSwish)):
+            if not isinstance(input, list):
+                input = input[0]
+            input = input.detach().cpu().numpy()
+
+            if isinstance(input, Q_Sym):
+                input = np.abs(input)
+            elif isinstance(input, Q_HSwish):
+                input = input + 3/8
+
+            input = input.reshape(-1)
+            input = input[input > 0]
+            input = np.sort(input)
+            
+            if len(input) == 0:
+                small, large = 0, 1e-3
+            else:
+                small, large = input[int(len(input) * eps)], input[int(len(input) * (1-eps))]
+            module.initialize_qonly(small, large - small)
+
+        if isinstance(module, (Q_Conv2d, Q_Linear)):
+            module.initialize_qonly()
+        
+        if isinstance(module, Q_Conv2d):
+            O, I, K1, K2 = module.weight.shape
+            N, C, H, W = input[0].shape
+            s = module.stride[0]
+            module.computation = O * I * K1 * K2 * H * W / s / s
+
+        if isinstance(module, Q_Linear):
+            O, I = module.weight.shape
+            N, I = input[0].shape
+            module.computation = O * I
+
+    hooks = []
+    for name, module in model.named_modules():
+        hook = module.register_forward_hook(initialize_hook)
+        hooks.append(hook)
+
+    model.train()
+    for i, (input, target) in enumerate(loader):
+        with torch.no_grad():
+            if isinstance(model, nn.DataParallel):
+                output = model.module(input.cuda())
+            else:
+                output = model(input.cuda())
+        break
+
+    model.cuda()
+    for hook in hooks:
+        hook.remove()
+
+
 class Q_Sequential(nn.Sequential):
     def __init__(self, *args):
         super(Q_Sequential, self).__init__()
@@ -405,9 +481,25 @@ class Q_Sequential(nn.Sequential):
                     self.add_module(str(idx), module)
                     idx += 1
 
+def transfer_bitwidth(model_src, model_dst): 
+    n_lvs_dict={}
+    bit_dict={}
+    for name, module in model_src.named_modules():
+        if isinstance(module, (Q_Conv2d, Q_Linear, Q_ReLU, Q_Sym, Q_HSwish)):
+            n_lvs_dict[name] = module.n_lvs.data
+            bit_dict[name] = module.bits.data
+    for name, module in model_dst.named_modules():
+        if isinstance(module, (Q_Conv2d, Q_Linear, Q_ReLU, Q_Sym, Q_HSwish)):
+            module.n_lvs.data = n_lvs_dict[name]
+            module.bits.data = bit_dict[name]
+            print(name)
+
 
 class QuantOps(object):
     initialize = initialize
+    initialize_quantizer = initialize_quantizer
+    transfer_bitwidth = transfer_bitwidth
+    
     Conv2d = Q_Conv2d
     ReLU = Q_ReLU
     ReLU6 = Q_ReLU6
