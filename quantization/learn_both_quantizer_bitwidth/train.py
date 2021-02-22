@@ -55,6 +55,7 @@ parser.add_argument('--retrain_type', default=1, type=int, help='1: init weight 
                                                             '3: init weight using searched net, reinit quantizer')
 parser.add_argument('--fasttest', action='store_true')
 parser.add_argument('--grad_scale', action='store_true')
+parser.add_argument('--lr_q_scale', default=1, type=float, help='lr_quant = args.lr * args.lr_q_scale')
 args = parser.parse_args()
 
 if args.exp == 'test':
@@ -196,7 +197,7 @@ else:
     raise NotImplementedError
 model = model.to(device)
 
-lr_quant = args.lr if args.grad_scale else args.lr * 1e-2
+lr_quant = args.lr * args.lr_q_scale
 # optimizer -> for further coding (got from PROFIT)
 def get_optimizer(params, train_weight, train_quant, train_bnbias, train_theta):
     global lr_quant
