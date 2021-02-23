@@ -30,7 +30,7 @@ parser.add_argument("--lr", default=0.005, type=float)
 parser.add_argument('--warmup', default=3, type=int)
 parser.add_argument('--ft_epoch', default=15, type=int)
 
-parser.add_argument('--log_interval', default=50, type=int, help='logging interval')
+parser.add_argument('--log_interval', default=100, type=int, help='logging interval')
 parser.add_argument('--exp', default='test', type=str)
 parser.add_argument('--seed', default=7, type=int, help='random seed')
 parser.add_argument("--quant_op", required=True)
@@ -66,7 +66,7 @@ else:
 #args.bitops_scaledown=1e-09
 args.workers = 8
 args.momentum = 0.9   # momentum value
-args.decay = 1e-4 # weight decay value
+args.decay = 5e-4 # weight decay value
 args.lb_mode = False
 args.comp_ratio = args.w_target_bit / 32. * args.a_target_bit / 32.
 
@@ -126,6 +126,9 @@ if args.grad_scale:
 elif args.quant_op == "duq":
     from functions.duq import *
     print("==> differentiable and unified quantization method is selected..")
+elif args.quant_op == "hwgq":
+    from functions.hwgq import *
+    print("==> Non-learnineg based HWGQ quantizer is selected..")
 elif args.quant_op == "qil":
     torch.autograd.set_detect_anomaly(True)
     from functions.qil import * 
@@ -193,6 +196,7 @@ if args.model == "mobilenetv2":
     if not os.path.isfile("./checkpoint/mobilenet_v2-b0353104.pth"):
         os.system("wget -P ./checkpoint https://download.pytorch.org/models/mobilenet_v2-b0353104.pth")
     model.load_state_dict(torch.load("./checkpoint/mobilenet_v2-b0353104.pth"), False)
+    print("pretrained weight is loaded.")
 else:
     raise NotImplementedError
 model = model.to(device)
@@ -253,11 +257,11 @@ with torch.no_grad():
 
         if args.retrain_type == 1:
             logging.info('[Retraining type 1] sample weight and quantizer parameter from bitsearch result')
-            print('==> weight bitwidth is set up..')
+            print('==> weight bitwidth is set up..') 
             QuantOps.initialize(model, train_loader, dummy_w_bits, weight=True)
             print('==> activation bitwidth is set up..')
             QuantOps.initialize(model, train_loader, dummy_a_bits, act=True)
-
+            
             print('==> load searched result..')
             model.load_state_dict(checkpoint)
             print('==> sample search result..')
@@ -434,7 +438,7 @@ def eval(epoch):
                 loss += loss_bitops 
                 eval_bitops_loss.update(loss_bitops.item(), inputs.size(0))
                 if (batch_idx) % (args.log_interval*5) == 0:
-                    logging.info(f'bitops_target:   {bitops_target}')
+                    logging.info(f'bitops_target: {bitops_target}')
                     logging.info(f'evalaution time bitops: {bitops}')
 
             acc1, acc5 = accuracy(outputs.data, targets.data, top_k=(1,5))

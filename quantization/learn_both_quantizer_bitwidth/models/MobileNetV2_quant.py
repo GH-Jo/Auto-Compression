@@ -7,8 +7,10 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.utils.model_zoo import load_url as load_state_dict_from_url
-from functions.duq import Q_Sym
-
+from functions.duq import QuantOps as QuantOps_duq
+from functions.hwgq import QuantOps as QuantOps_hwgq
+import numpy as np
+Q_Sym = None
 
 __all__ = ['MobileNetV2', 'mobilenet_v2']
 
@@ -108,8 +110,6 @@ class InvertedResidual(nn.Module):
                     print(type(self.conv[0](x)))
                     print(self.conv[0](x).shape)
                     exit()
-                    
-
 
                 x, cost = self.conv[1][0](x, cost, act_size)
                 x = self.conv[1][1](x)
@@ -160,6 +160,13 @@ class MobileNetV2(nn.Module):
             block: Module specifying inverted residual building block for mobilenet
         """
         super(MobileNetV2, self).__init__()
+        global Q_Sym
+        if ops == QuantOps_duq:
+            print("\n\n** QuantOps_duq is selected **\n\n")
+            Q_Sym = QuantOps_duq.Sym
+        elif ops == QuantOps_hwgq:
+            print("\n\n** QuantOps_hwgq is selected **\n\n")
+            Q_Sym = QuantOps_hwgq.Sym
 
         if block is None:
             block = InvertedResidual
@@ -227,26 +234,24 @@ class MobileNetV2(nn.Module):
 
     # method 1: cost passing with indexing
     def _forward(self, x):
-
         # first conv
         act_size = 32
         cost = torch.Tensor([0]).cuda()
         x, cost = self.features[0][0](x, cost, act_size)
-        #print(cost)
         x = self.features[0][1](x)
+        #np.save('0222_lbq_output.npy', x.cpu().detach())
         t = self.features[0][2](x)
         x, act_size = t
+        
 
         # InvertedResidual blocks
         x, cost = self.features[1](x, cost, act_size)
-        #print(cost)
-        #print('cost in model', type(cost), cost.shape)
         for i in range(2, 18):
-            #print(i)
             x, cost = self.features[i](x, cost)
         x, act_size =  self.features[18](x)
         x, cost = self.features[19][0](x, cost, act_size)
         x = self.features[19][1](x)
+        
         
         # classifier
         x = F.relu(x, inplace=True)
