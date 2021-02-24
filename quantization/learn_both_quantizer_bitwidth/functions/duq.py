@@ -68,6 +68,7 @@ class Q_ReLU(nn.Module):
             x = F.relu(x, self.inplace)
         
         if len(self.bits)==1 and self.bits[0]==32:
+            #print("Q_ReLU")
             return x, 32
         else:
             a = F.softplus(self.a)
@@ -137,6 +138,7 @@ class Q_Sym(nn.Module):
 
     def forward(self, x):
         if len(self.bits)==1 and self.bits[0]==32:
+            #print("Q_Sym")
             return x, 32
         else:
             a = F.softplus(self.a)
@@ -231,6 +233,7 @@ class Q_Conv2d(nn.Conv2d):
 
     def forward(self, x, cost, act_size=None):
         if len(self.bits)==1 and self.bits[0]==32:
+            #print("Q_Conv2d")
             cost += act_size * 32 * self.computation
             return F.conv2d(x, self.weight, self.bias,
                 self.stride, self.padding, self.dilation, self.groups), cost
@@ -283,6 +286,7 @@ class Q_Linear(nn.Linear):
 
     def forward(self, x, cost, act_size=None):
         if len(self.bits)==1 and self.bits[0]==32:
+            #print("Q_Linear")
             cost += act_size * 32 * self.computation
             return F.linear(x, self.weight, self.bias), cost
         else:
@@ -315,6 +319,10 @@ class Q_Conv2dPad(Q_Conv2d):
 
 
 def initialize(model, loader, bits, act=False, weight=False, eps=0.05):
+    if weight: 
+        print('==> set up weight bitwidth..')
+    elif act: 
+        print('==> set up activation bitwidth..')
     if isinstance(bits, int):
         bits = [bits]
     def initialize_hook(module, input, output):

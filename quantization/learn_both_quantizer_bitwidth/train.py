@@ -52,7 +52,8 @@ parser.add_argument('--alternate', action="store_true")
 parser.add_argument('--retrain_path', default='', type=str, help='logged weight path to retrain')
 parser.add_argument('--retrain_type', default=1, type=int, help='1: init weight using searched net\n'\
                                                             '2: init weight using pretrained\n'\
-                                                            '3: init weight using searched net, reinit quantizer')
+                                                            '3: init weight using searched net, reinit quantizer\n'\
+                                                            '4: init weight using searched net, fixed bitwidth')
 parser.add_argument('--fasttest', action='store_true')
 parser.add_argument('--grad_scale', action='store_true')
 parser.add_argument('--lr_q_scale', default=1, type=float, help='lr_quant = args.lr * args.lr_q_scale')
@@ -257,9 +258,7 @@ with torch.no_grad():
 
         if args.retrain_type == 1:
             logging.info('[Retraining type 1] sample weight and quantizer parameter from bitsearch result')
-            print('==> weight bitwidth is set up..') 
             QuantOps.initialize(model, train_loader, dummy_w_bits, weight=True)
-            print('==> activation bitwidth is set up..')
             QuantOps.initialize(model, train_loader, dummy_a_bits, act=True)
             
             print('==> load searched result..')
@@ -269,12 +268,12 @@ with torch.no_grad():
         
         elif args.retrain_type == 2:
             logging.info('[Retraining type 2] load weight from pretrained model, and just change bitwidths')
-            print('==> Initialize for main model..')
+            print('=> Initialize for main model..')
             QuantOps.initialize(model, train_loader, dummy_w_bits[0], weight=True)
             QuantOps.initialize(model, train_loader, dummy_a_bits[0], act=True)
             
             model2 = copy.deepcopy(model) 
-            print('==> Initialize for auxilary model..')
+            print('=> Initialize for auxilary model..')
             QuantOps.initialize(model2, train_loader, dummy_w_bits, weight=True)
             QuantOps.initialize(model2, train_loader, dummy_a_bits, act=True)
             model2.load_state_dict(checkpoint)
@@ -287,7 +286,7 @@ with torch.no_grad():
 
         elif args.retrain_type == 3:
             logging.info('[Retraining type 3] sample weight from bitsearch result, and reinitialize a and c')
-            print('==> Initialize for main model..')
+            print('=> Initialize for main model..')
             QuantOps.initialize(model, train_loader, dummy_w_bits, weight=True)
             QuantOps.initialize(model, train_loader, dummy_a_bits, act=True)
             model.load_state_dict(checkpoint)
@@ -296,6 +295,15 @@ with torch.no_grad():
             sample_search_result(model)
             model = model.to(device)
             QuantOps.initialize_quantizer(model, train_loader)
+
+        elif args.retrain_type == 4:
+            logging.info('[Retraining type 4] initialize weight using bitsearch result, training fixed bitwidth')
+            QuantOps.initialize(model, train_loader, dummy_w_bits, weight=True)
+            QuantOps.initialize(model, train_loader, dummy_a_bits, act=True)
+            model.load_state_dict(checkpoint, strict=False)
+            QuantOps.initialize(model, train_loader, args.w_bit, weight=True)
+            QuantOps.initialize(model, train_loader, args.a_bit, act=True)
+
 
         # ---- Variable interval (end) ---------------------------
         _, _, str_sel, _ = extract_bitwidth(model, weight_or_act="weight")
