@@ -394,7 +394,7 @@ def sample_search_result(model, hard=True, print=True):
         raise NotImplementedError
 
 
-def extract_bitwidth(model, weight_or_act=None):
+def extract_bitwidth(model, weight_or_act=None, tau=1):
     if weight_or_act == "weight":
         i = 1
         module_set = (Q_Conv2d, Q_Linear)
@@ -407,7 +407,7 @@ def extract_bitwidth(model, weight_or_act=None):
     str_prob = ''
     for _, m in enumerate(model.modules()):
         if isinstance(m, module_set):
-            prob = F.softmax(m.theta)
+            prob = F.softmax(m.theta / tau, dim=0)
             list_select.append(int(m.bits[torch.argmax(prob)].item()))
             list_prob.append(prob)
 

@@ -313,3 +313,15 @@ def resume_checkpoint(model, model_ema, optimizer, scheduler, root, prefix='trai
     else:
         print("==> Can't find checkpoint...training from initial stage")
         return (0, 0)
+
+
+def get_tau(tau_init, tau_target, total_epoch, cur_epoch):
+    tau = tau_init - (cur_epoch-1) * (tau_init - tau_target) / (total_epoch-1)
+    string_to_log = f"[Epoch {cur_epoch}] tau = {tau:.4f} (init = {tau_init:.2f} -> target = {tau_target:.2f})"
+    return tau, string_to_log
+
+
+def get_alpha(tau_init, tau_target, total_epoch, cur_epoch):
+    tau = tau_init - (cur_epoch-1) * (tau_init - tau_target) / (total_epoch-1)
+    string_to_log = f"[Epoch {cur_epoch}] alpha = {tau:.4e} (init = {tau_init:.2e} -> target = {tau_target:.2e})"
+    return tau, string_to_log

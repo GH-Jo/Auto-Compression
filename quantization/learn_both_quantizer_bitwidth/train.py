@@ -57,6 +57,12 @@ parser.add_argument('--retrain_type', default=1, type=int, help='1: init weight 
 parser.add_argument('--fasttest', action='store_true')
 parser.add_argument('--grad_scale', action='store_true')
 parser.add_argument('--lr_q_scale', default=1, type=float, help='lr_quant = args.lr * args.lr_q_scale')
+parser.add_argument('--tau_init', default=1, type=float, help='softmax tau (initial)')
+parser.add_argument('--tau_target', default=1, type=float, help='softmax tau (final)')
+parser.add_argument('--alpha_init', default=1e-10, type=float, help='bitops scaling factor (initial)')
+parser.add_argument('--alpha_target', default=1e-10, type=float, help='softmax tau (final)')
+
+
 args = parser.parse_args()
 
 if args.exp == 'test':
@@ -112,7 +118,8 @@ random.seed(args.seed)
 best_acc = 0
 last_epoch = 0
 end_epoch = args.ft_epoch
-
+tau = args.tau_init
+alpha = args.alpha_init
 
 # Dataloader
 print('==> Preparing Data..')
@@ -234,6 +241,7 @@ def categorize_param(model):
         else:
             weight.append(param)
     return (weight, quant, bnbias, theta, skip,)
+
 
 
 # Bitwidth Initilization 
@@ -379,7 +387,7 @@ def train(epoch, phase=None):
         if args.lb_mode and optimizer.param_groups[3]['lr'] != 0 :#(epoch-1) % (args.w_ep + args.t_ep) >= args.w_ep:
             if not isinstance(bitops, (float, int)):
                 bitops = bitops.mean()
-            loss_bitops = F.relu((bitops - bitops_target) * args.scaling).reshape(torch.Size([]))
+            loss_bitops = F.relu((bitops - bitops_target) * alpha).reshape(torch.Size([]))
             loss += loss_bitops 
             eval_bitops_loss.update(loss_bitops.item(), inputs.size(0))
 
@@ -408,13 +416,13 @@ def train(epoch, phase=None):
         end = time.time()
     optimizer.param_groups[0]['lr'] = current_lr
     optimizer.param_groups[3]['lr'] = current_lr 
-
+    global tau
     if args.lb_mode:
-        _, _, str_select, str_prob = extract_bitwidth(model, weight_or_act="weight")
+        _, _, str_select, str_prob = extract_bitwidth(model, weight_or_act="weight", tau=tau)
         logging.info(f'Epoch {epoch}, weight bitwidth selection \n' + \
                       str_select + '\n'+ str_prob)
         
-        _, _, str_select, str_prob = extract_bitwidth(model, weight_or_act="act")
+        _, _, str_select, str_prob = extract_bitwidth(model, weight_or_act="act", tau=tau)
         logging.info(f'Epoch {epoch}, activation bitwidth selection probability: \n' + \
                       str_select + '\n'+ str_prob)
         
@@ -442,7 +450,7 @@ def eval(epoch):
             if args.lb_mode:
                 if not isinstance(bitops, (float, int)):
                     bitops = bitops.mean()
-                loss_bitops = F.relu((bitops - bitops_target) * args.scaling).reshape(torch.Size([]))
+                loss_bitops = F.relu((bitops - bitops_target) * alpha).reshape(torch.Size([]))
                 loss += loss_bitops 
                 eval_bitops_loss.update(loss_bitops.item(), inputs.size(0))
                 if (batch_idx) % (args.log_interval*5) == 0:
@@ -491,10 +499,21 @@ if __name__ == '__main__':
     else:
         last_epoch, best_acc = resume_checkpoint(model, None, optimizer, scheduler, 
                                         args.save, args.exp)
+        
         for epoch in range(last_epoch+1, end_epoch+1):
+            tau, string = get_tau(args.tau_init, args.tau_target, args.ft_epoch, epoch)
+            logging.info(string)
+
+            alpha, string = get_alpha(args.alpha_init, args.alpha_target, args.ft_epoch, epoch)
+            logging.info(string)
+            
+            for module in model.modules():
+                if isinstance(module, (QuantOps.Conv2d, QuantOps.ReLU, QuantOps.Sym, QuantOps.Linear, QuantOps.ReLU6)):
+                    module.tau = tau
             logging.info('Epoch: %d/%d Best_Acc: %.3f' %(epoch, end_epoch, best_acc))
             train(epoch, phase='Search')
             eval(epoch)
-            scheduler.step() 
+            scheduler.step()
+
             
     logging.info('Best accuracy : {:.3f} %'.format(best_acc))
