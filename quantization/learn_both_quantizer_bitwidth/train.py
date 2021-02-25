@@ -427,8 +427,7 @@ def train(epoch, phase=None):
                 time.sleep(args.cooltime)
                 print('done.')
             
-            ### TODO : log theta of several selected modules (testing phase) 
-            logging.info('write selected module theta to file')
+            ###  log theta of several selected modules
             i = 1
             fw_list = []
             fa_list = []
@@ -454,7 +453,7 @@ def train(epoch, phase=None):
             for f_ in fw_list + fa_list:
                 f_.close()
         end = time.time()
-        
+
     optimizer.param_groups[0]['lr'] = current_lr
     optimizer.param_groups[3]['lr'] = current_lr 
     if args.lb_mode:
