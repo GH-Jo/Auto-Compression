@@ -315,13 +315,25 @@ def resume_checkpoint(model, model_ema, optimizer, scheduler, root, prefix='trai
         return (0, 0)
 
 
-def get_tau(tau_init, tau_target, total_epoch, cur_epoch):
-    tau = tau_init - (cur_epoch-1) * (tau_init - tau_target) / (total_epoch-1)
-    string_to_log = f"[Epoch {cur_epoch}] tau = {tau:.4f} (init = {tau_init:.2f} -> target = {tau_target:.2f})"
+def get_tau(tau_init, tau_target, total_epoch, cur_epoch, scaling_type):
+    if scaling_type == "exponential":
+        beta = math.pow(tau_target/tau_init, (cur_epoch-1)/(total_epoch-1))
+        tau = tau_init * beta
+    elif scaling_type == "cosine":
+        tau = tau_target + 1/2*(tau_init-tau_target)*(1 + math.cos(math.pi * (cur_epoch-1)/(total_epoch-1)))
+    elif scaling_type == "linear":
+        tau = tau_init - (cur_epoch-1) * (tau_init - tau_target) / (total_epoch-1)
+    string_to_log = f"[Epoch {cur_epoch}] tau   = {tau:.4f} (init = {tau_init:.2f} -> target = {tau_target:.2f})"
     return tau, string_to_log
 
 
-def get_alpha(tau_init, tau_target, total_epoch, cur_epoch):
-    tau = tau_init - (cur_epoch-1) * (tau_init - tau_target) / (total_epoch-1)
+def get_alpha(tau_init, tau_target, total_epoch, cur_epoch, scaling_type):
+    if scaling_type == "exponential":
+        beta = math.pow(tau_target/tau_init, (cur_epoch-1)/(total_epoch-1))
+        tau = tau_init * beta
+    elif scaling_type == "cosine":
+        tau = tau_target + 1/2*(tau_init-tau_target)*(1 + math.cos(math.pi * (cur_epoch-1)/(total_epoch-1)))
+    elif scaling_type == "linear":
+        tau = tau_init - (cur_epoch-1) * (tau_init - tau_target) / (total_epoch-1)
     string_to_log = f"[Epoch {cur_epoch}] alpha = {tau:.4e} (init = {tau_init:.2e} -> target = {tau_target:.2e})"
     return tau, string_to_log

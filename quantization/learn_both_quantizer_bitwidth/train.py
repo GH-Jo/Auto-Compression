@@ -19,6 +19,7 @@ from functions import *
 from models import *
 from models.MobileNetV2_quant import mobilenet_v2
 from utils import *
+import math
 
 parser = argparse.ArgumentParser(description='PyTorch - Learning Quantization')
 parser.add_argument('--model', default='mobilenetv2', help='select model')
@@ -27,8 +28,11 @@ parser.add_argument('--dataset', default='imagenet', help='select dataset')
 
 parser.add_argument('--batchsize', default=64, type=int, help='set batch size')
 parser.add_argument("--lr", default=0.005, type=float)
+parser.add_argument("--lr_quant", default=0.005, type=float)
+parser.add_argument("--lr_theta", default=0.005, type=float)
+parser.add_argument("--lr_bn", default=0.005, type=float)
 parser.add_argument('--warmup', default=3, type=int)
-parser.add_argument('--ft_epoch', default=15, type=int)
+parser.add_argument('--epochs', default=15, type=int)
 
 parser.add_argument('--log_interval', default=100, type=int, help='logging interval')
 parser.add_argument('--exp', default='test', type=str)
@@ -40,7 +44,7 @@ parser.add_argument('--w_target_bit', default=4, type=float, help='set target we
 parser.add_argument('--a_target_bit', default=4, type=float, help='set target activation bitwidth')
 parser.add_argument('--w_bit', default=[32], type=int, nargs='+', help='set weight bits')
 parser.add_argument('--a_bit', default=[32], type=int, nargs='+', help='set activation bits')
-parser.add_argument('--scaling', default=1e-6, type=float, help='set FLOPs loss scaling factor')
+#parser.add_argument('--scaling', default=1e-6, type=float, help='set FLOPs loss scaling factor')
 
 
 parser.add_argument('--eval', action='store_true', help='evaluation mode')
@@ -56,11 +60,13 @@ parser.add_argument('--retrain_type', default=1, type=int, help='1: init weight 
                                                             '4: init weight using searched net, fixed bitwidth')
 parser.add_argument('--fasttest', action='store_true')
 parser.add_argument('--grad_scale', action='store_true')
-parser.add_argument('--lr_q_scale', default=1, type=float, help='lr_quant = args.lr * args.lr_q_scale')
+#parser.add_argument('--lr_q_scale', default=1, type=float, help='lr_quant = args.lr * args.lr_q_scale')
 parser.add_argument('--tau_init', default=1, type=float, help='softmax tau (initial)')
 parser.add_argument('--tau_target', default=1, type=float, help='softmax tau (final)')
+parser.add_argument('--tau_type', default='linear', type=str, help='softmax tau annealing type [linear, exponential, cosine]')
 parser.add_argument('--alpha_init', default=1e-10, type=float, help='bitops scaling factor (initial)')
-parser.add_argument('--alpha_target', default=1e-10, type=float, help='softmax tau (final)')
+parser.add_argument('--alpha_target', default=1e-10, type=float, help='bitops scaling factor (final)')
+parser.add_argument('--alpha_type', default='linear', type=str, help='bitops scaling factor annealing type [linear, exponential, cosine]')
 
 
 args = parser.parse_args()
@@ -76,6 +82,7 @@ args.momentum = 0.9   # momentum value
 args.decay = 5e-4 # weight decay value
 args.lb_mode = False
 args.comp_ratio = args.w_target_bit / 32. * args.a_target_bit / 32.
+
 
 if (len(args.w_bit) > 1 or len(args.a_bit) > 1) and not args.lb_off:
     args.lb_mode = True
@@ -117,7 +124,7 @@ random.seed(args.seed)
 
 best_acc = 0
 last_epoch = 0
-end_epoch = args.ft_epoch
+end_epoch = args.epochs
 tau = args.tau_init
 alpha = args.alpha_init
 
@@ -209,16 +216,16 @@ else:
     raise NotImplementedError
 model = model.to(device)
 
-lr_quant = args.lr * args.lr_q_scale
+
 # optimizer -> for further coding (got from PROFIT)
 def get_optimizer(params, train_weight, train_quant, train_bnbias, train_theta):
     global lr_quant
     (weight, quant, bnbias, theta, skip) = params
     optimizer = optim.SGD([
         {'params': weight, 'weight_decay': args.decay, 'lr': args.lr  if train_weight else 0},
-        {'params': quant, 'weight_decay': 0., 'lr': lr_quant if train_quant else 0},
-        {'params': bnbias, 'weight_decay': 0., 'lr': args.lr if train_bnbias else 0},
-        {'params': theta, 'weight_decay': 0., 'lr': args.lr if train_theta else 0},
+        {'params': quant, 'weight_decay': 0., 'lr': args.lr_quant if train_quant else 0},
+        {'params': bnbias, 'weight_decay': 0., 'lr': args.lr_bn if train_bnbias else 0},
+        {'params': theta, 'weight_decay': 0., 'lr': args.lr_theta if train_theta else 0},
         {'params': skip, 'weight_decay': 0, 'lr': 0},
     ], momentum=args.momentum, nesterov=True)
     return optimizer
@@ -345,13 +352,18 @@ current_lr = -1
 
 scheduler = CosineWithWarmup(optimizer, 
         warmup_len=args.warmup, warmup_start_multiplier=0.1,
-        max_epochs=args.ft_epoch, eta_min=1e-3)
+        max_epochs=args.epochs, eta_min=1e-3)
 
 criterion = nn.CrossEntropyLoss()
+
+w_module_nums = [4, 32, 36, 39, 123, 127, 130] if len(args.w_bit) > 1 else []
+a_module_nums = [6, 30, 34, 38, 121, 125, 129] if len(args.a_bit) > 1 else []
 
 
 # Training
 def train(epoch, phase=None):
+    
+    global tau
     logging.info(f'[{phase}] train:')
     for i in range(len(optimizer.param_groups)):
         logging.info(f'[epoch {epoch}] optimizer, lr{i} = {optimizer.param_groups[i]["lr"]:.6f}')
@@ -364,6 +376,7 @@ def train(epoch, phase=None):
     
     end = t0 = time.time()
     for batch_idx, (inputs, targets) in enumerate(train_loader):
+        '''
         if args.lb_mode and args.alternate:
             if batch_idx % 1000 == 0: # learning weight
                 optimizer.param_groups[0]['lr'] = current_lr
@@ -376,7 +389,8 @@ def train(epoch, phase=None):
                 optimizer.param_groups[1]['lr'] = 0
                 optimizer.param_groups[3]['lr'] = current_lr  # 0:weight  1:quant  2:bnbias  3:theta
                 # TODO: consider quantizer parameter lr
-        
+        '''
+
         inputs, targets = inputs.to(device), targets.to(device)
         data_time = time.time()
         outputs, bitops = model(inputs)
@@ -412,11 +426,37 @@ def train(epoch, phase=None):
                 print(f'> [sleep] {args.cooltime}s for cooling GPUs.. ', end='', flush=True)
                 time.sleep(args.cooltime)
                 print('done.')
-        
+            
+            ### TODO : log theta of several selected modules (testing phase) 
+            logging.info('write selected module theta to file')
+            i = 1
+            fw_list = []
+            fa_list = []
+            for num in w_module_nums:
+                fw_list.append(open(os.path.join(args.save, f'w_{num}_theta.txt'), mode='a'))
+            for num in a_module_nums:
+                fa_list.append(open(os.path.join(args.save, f'a_{num}_theta.txt'), mode='a'))
+            for m in model.modules():
+                if i in w_module_nums:
+                    prob = F.softmax(m.theta / tau, dim=0)
+                    prob = [f'{i:.5f}' for i in prob.cpu().tolist()]
+                    prob = ", ".join(prob) + "\n"
+                    fw_list[w_module_nums.index(i)].write(prob)
+                    #print(f"[DEBUG] {w_module_nums.index(i)}-th weight module is wrote")
+
+                elif i in a_module_nums:
+                    prob = F.softmax(m.theta / tau, dim=0)
+                    prob = [f'{i:.5f}' for i in prob.cpu().tolist()]
+                    prob = ", ".join(prob) + "\n"
+                    fa_list[a_module_nums.index(i)].write(prob)
+                    #print(f"[DEBUG] {a_module_nums.index(i)}-th activation module is wrote")
+                i += 1
+            for f_ in fw_list + fa_list:
+                f_.close()
         end = time.time()
+        
     optimizer.param_groups[0]['lr'] = current_lr
     optimizer.param_groups[3]['lr'] = current_lr 
-    global tau
     if args.lb_mode:
         _, _, str_select, str_prob = extract_bitwidth(model, weight_or_act="weight", tau=tau)
         logging.info(f'Epoch {epoch}, weight bitwidth selection \n' + \
@@ -441,6 +481,7 @@ def eval(epoch):
 
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(val_loader):
+            
             inputs, targets = inputs.to(device), targets.to(device)
 
             outputs, bitops = model(inputs)
@@ -501,10 +542,10 @@ if __name__ == '__main__':
                                         args.save, args.exp)
         
         for epoch in range(last_epoch+1, end_epoch+1):
-            tau, string = get_tau(args.tau_init, args.tau_target, args.ft_epoch, epoch)
+            tau, string = get_tau(args.tau_init, args.tau_target, args.epochs, epoch, args.tau_type)
             logging.info(string)
 
-            alpha, string = get_alpha(args.alpha_init, args.alpha_target, args.ft_epoch, epoch)
+            alpha, string = get_alpha(args.alpha_init, args.alpha_target, args.epochs, epoch, args.alpha_type)
             logging.info(string)
             
             for module in model.modules():
