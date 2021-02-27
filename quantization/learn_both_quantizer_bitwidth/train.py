@@ -322,9 +322,9 @@ with torch.no_grad():
 
         # ---- Variable interval (end) ---------------------------
         _, _, str_sel, _ = extract_bitwidth(model, weight_or_act="weight")
-        print(str_sel)
+        logging.info(str_sel)
         _, _, str_sel, _ = extract_bitwidth(model, weight_or_act="act")
-        print(str_sel)
+        logging.info(str_sel)
 
         model = model.to(device)
         logging.info(f"## sampled model bitops: {int(get_bitops(model, device).item())}")
