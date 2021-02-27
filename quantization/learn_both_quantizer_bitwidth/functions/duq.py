@@ -48,6 +48,7 @@ class Q_ReLU(nn.Module):
         self.a = Parameter(Tensor(1))
         self.c = Parameter(Tensor(1))
         self.theta = Parameter(Tensor([1]))
+        self.tau = 1
 
     def initialize(self, bits, offset, diff):
         self.bits = Parameter(Tensor(bits), requires_grad=False)
@@ -55,7 +56,8 @@ class Q_ReLU(nn.Module):
         self.a = Parameter(Tensor(len(self.bits)))
         self.c = Parameter(Tensor(len(self.bits)))
 
-        self.theta = Parameter(torch.ones(len(self.bits))/len(self.bits))
+        #self.theta = Parameter(torch.ones(len(self.bits))/len(self.bits))
+        self.theta = Parameter(F.softmax(self.bits ** 2, dim=0))
         self.a.data.fill_(np.log(np.exp(offset + diff)-1))
         self.c.data.fill_(np.log(np.exp(offset + diff)-1))
     
@@ -74,14 +76,23 @@ class Q_ReLU(nn.Module):
             a = F.softplus(self.a)
             c = F.softplus(self.c)
 
-            # 1) for loop
-            softmask = F.gumbel_softmax(self.theta, tau=1, hard=False, dim=0)
-            softmask = softmask
-            x_bar = torch.zeros_like(x)
+            if self.train:
+                softmask = F.gumbel_softmax(self.theta, tau=self.tau, hard=False, dim=0)
+            else:
+                softmask = F.softmax(self.theta/self.tau, dim=0)
+            #x_bar = torch.zeros_like(x)
+            '''
             for i, n_lv in enumerate(self.n_lvs):
+            
                 x_temp = F.hardtanh(x / a[i], 0, 1)
-                #x_bar += RoundQuant.apply(x, n_lv) * c * softmask[i]
                 x_bar = torch.add(x_bar, RoundQuant.apply(x_temp, n_lv) * c[i] * softmask[i])
+            '''
+            a_mean = (softmask * a).sum()
+            c_mean = (softmask * c).sum()
+            n_lv_mean = (softmask * self.n_lvs.to(softmask.device)).sum()
+
+            x = F.hardtanh(x / a_mean, 0, 1)
+            x_bar = RoundQuant.apply(x, n_lv_mean) * c_mean
             act_size = (softmask * self.bits).sum()
             return x_bar, act_size
 
@@ -96,6 +107,7 @@ class Q_ReLU6(Q_ReLU):
         self.a = Parameter(Tensor(len(self.bits)))
         self.c = Parameter(Tensor(len(self.bits)))
         self.theta = Parameter(torch.ones(len(self.n_lvs))/len(self.n_lvs))
+        self.theta = Parameter(F.softmax(self.bits ** 2, dim=0))
 
         if offset + diff > 6:
             self.a.data.fill_(np.log(np.exp(6)-1))
@@ -121,6 +133,7 @@ class Q_Sym(nn.Module):
         self.a = Parameter(Tensor(1))
         self.c = Parameter(Tensor(1))
         self.theta = Parameter(Tensor([1]))
+        self.tau = 1
 
     def initialize(self, bits, offset, diff):
         self.bits = Parameter(Tensor(bits), requires_grad=False)
@@ -128,7 +141,8 @@ class Q_Sym(nn.Module):
         self.a = Parameter(Tensor(len(self.bits)))
         self.c = Parameter(Tensor(len(self.bits)))
 
-        self.theta = Parameter(torch.ones(len(self.bits))/len(self.bits))
+        #self.theta = Parameter(torch.ones(len(self.bits))/len(self.bits))
+        self.theta = Parameter(F.softmax(self.bits ** 2, dim=0))
         self.a.data.fill_(np.log(np.exp(offset + diff)-1))
         self.c.data.fill_(np.log(np.exp(offset + diff)-1))
     
@@ -144,12 +158,22 @@ class Q_Sym(nn.Module):
             a = F.softplus(self.a)
             c = F.softplus(self.c)
             
-            softmask = F.gumbel_softmax(self.theta, tau=1, hard=False, dim=0)
-            softmask = softmask
+            if self.train:
+                softmask = F.gumbel_softmax(self.theta, tau=self.tau, hard=False, dim=0)
+            else:
+                softmask = F.softmax(self.theta/self.tau, dim=0)
+            '''
             x_bar = torch.zeros_like(x)
             for i, n_lv in enumerate(self.n_lvs):
                 x_temp = F.hardtanh(x / a[i], -1, 1)
                 x_bar = torch.add(x_bar, RoundQuant.apply(x_temp, n_lv // 2) * c[i] * softmask[i])
+            '''
+            a_mean = (softmask * a).sum()
+            c_mean = (softmask * c).sum()
+            n_lv_mean = (softmask * self.n_lvs.to(softmask.device)).sum()
+
+            x = F.hardtanh(x / a_mean, -1, 1)
+            x_bar = RoundQuant.apply(x, torch.round(n_lv_mean / 2)) * c_mean
             act_size = (softmask * self.bits).sum()
             return x_bar, act_size
 
@@ -198,6 +222,7 @@ class Q_Conv2d(nn.Conv2d):
         self.weight_old = None
         self.theta = Parameter(Tensor([1]))
         self.computation = 0
+        self.tau = 1
 
     def initialize(self, bits):
         self.bits = Parameter(Tensor(bits), requires_grad=False)
@@ -205,7 +230,8 @@ class Q_Conv2d(nn.Conv2d):
         self.a = Parameter(Tensor(len(self.bits)))
         self.c = Parameter(Tensor(len(self.bits)))
         
-        self.theta = Parameter(torch.ones(len(self.bits))/len(self.bits))
+        #self.theta = Parameter(torch.ones(len(self.bits))/len(self.bits))
+        self.theta = Parameter(F.softmax(self.bits ** 2, dim=0))
         max_val = self.weight.data.abs().max().item()
         self.a.data.fill_(np.log(np.exp(max_val * 0.9)-1))
         self.c.data.fill_(np.log(np.exp(max_val * 0.9)-1))
@@ -219,16 +245,23 @@ class Q_Conv2d(nn.Conv2d):
         a = F.softplus(self.a)
         c = F.softplus(self.c)
         
-        softmask = F.gumbel_softmax(self.theta, tau=1, hard=False, dim=0)
+        if self.train:
+            softmask = F.gumbel_softmax(self.theta, tau=self.tau, hard=False, dim=0)
+        else:
+            softmask = F.softmax(self.theta/self.tau, dim=0)
+        '''
         w_bar = torch.zeros_like(self.weight)
         for i, n_lv in enumerate(self.n_lvs):
             weight = F.hardtanh(self.weight / a[i], -1, 1)
             w_bar = torch.add(w_bar, RoundQuant.apply(weight, n_lv // 2) * c[i] * softmask[i])
-        #print('softmask.device: ',softmask.device)
-        #print('self.bits.device: ',self.bits.device)
-        
-        bitwidth = (softmask * self.bits).sum()
+        '''
+        a_mean = (softmask * a).sum()
+        c_mean = (softmask * c).sum()
+        n_lv_mean = (softmask * self.n_lvs.to(softmask.device)).sum()
 
+        w_bar = F.hardtanh(self.weight / a_mean, -1, 1)
+        w_bar = RoundQuant.apply(w_bar, torch.round(n_lv_mean / 2)) * c_mean
+        bitwidth = (softmask * self.bits).sum()
         return w_bar, bitwidth
 
     def forward(self, x, cost, act_size=None):
@@ -254,6 +287,7 @@ class Q_Linear(nn.Linear):
         self.weight_old = None
         self.theta = Parameter(Tensor([1]))
         self.computation = 0
+        self.tau = 1
 
     def initialize(self, bits):
         self.bits = Parameter(Tensor(bits), requires_grad=False)
@@ -261,7 +295,8 @@ class Q_Linear(nn.Linear):
         self.a = Parameter(Tensor(len(self.bits)))
         self.c = Parameter(Tensor(len(self.bits)))
 
-        self.theta = Parameter(torch.ones(len(self.bits))/len(self.bits))
+        #self.theta = Parameter(torch.ones(len(self.bits))/len(self.bits))
+        self.theta = Parameter(F.softmax(self.bits ** 2, dim=0))
         max_val = self.weight.data.abs().max().item()
         self.a.data.fill_(np.log(np.exp(max_val * 0.9)-1))
         self.c.data.fill_(np.log(np.exp(max_val * 0.9)-1))
@@ -275,11 +310,22 @@ class Q_Linear(nn.Linear):
         a = F.softplus(self.a)
         c = F.softplus(self.c)
 
-        softmask = F.gumbel_softmax(self.theta, tau=1, hard=False, dim=0)
+        if self.train:
+            softmask = F.gumbel_softmax(self.theta, tau=self.tau, hard=False, dim=0)
+        else:
+            softmask = F.softmax(self.theta/self.tau, dim=0)
+        '''
         w_bar = torch.zeros_like(self.weight)
         for i, n_lv in enumerate(self.n_lvs):
             weight = F.hardtanh(self.weight / a[i], -1, 1)                
             w_bar = torch.add(w_bar, RoundQuant.apply(weight, n_lv // 2) * c[i] * softmask[i])
+        '''
+        a_mean = (softmask * a).sum()
+        c_mean = (softmask * c).sum()
+        n_lv_mean = (softmask * self.n_lvs.to(softmask.device)).sum()
+
+        w_bar = F.hardtanh(self.weight / a_mean, -1, 1)
+        w_bar = RoundQuant.apply(w_bar, torch.round(n_lv_mean / 2)) * c_mean
         bitwidth = (softmask * self.bits).sum()
         return w_bar, bitwidth
     
