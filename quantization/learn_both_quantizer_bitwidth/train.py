@@ -29,7 +29,8 @@ parser.add_argument('--dataset', default='imagenet', help='select dataset')
 parser.add_argument('--batchsize', default=64, type=int, help='set batch size')
 parser.add_argument("--lr", default=0.005, type=float)
 parser.add_argument("--lr_quant", default=0.005, type=float)
-parser.add_argument("--lr_theta", default=0.005, type=float)
+parser.add_argument("--lr_w_theta", default=0.005, type=float)
+parser.add_argument("--lr_a_theta", default=0.005, type=float)
 parser.add_argument("--lr_bn", default=0.005, type=float)
 parser.add_argument('--warmup', default=3, type=int)
 parser.add_argument('--epochs', default=15, type=int)
@@ -174,7 +175,6 @@ def get_bitops_total():
     QuantOps.initialize(model_, train_loader, 32, weight=True)
     QuantOps.initialize(model_, train_loader, 32, act=True)
     _, bitops = model_(input)
-
     return bitops
 
 
@@ -201,9 +201,6 @@ logging.info(f'bitops_total : {int(bitops_total):d}')
 logging.info(f'bitops_target: {int(bitops_target):d}')
 #logging.info(f'bitops_wrong : {int(bitops_total * (args.w_target_bit/32.) * (args.a_target_bit/32.)):d}')
 
-#bitops_total *= args.bitops_scaledown
-#bitops_target *= args.bitops_scaledown
-
 
 # model
 if args.model == "mobilenetv2":
@@ -218,14 +215,15 @@ model = model.to(device)
 
 
 # optimizer -> for further coding (got from PROFIT)
-def get_optimizer(params, train_weight, train_quant, train_bnbias, train_theta):
+def get_optimizer(params, train_weight, train_quant, train_bnbias, train_w_theta, train_a_theta):
     global lr_quant
-    (weight, quant, bnbias, theta, skip) = params
+    (weight, quant, bnbias, theta_w, theta_a, skip) = params
     optimizer = optim.SGD([
         {'params': weight, 'weight_decay': args.decay, 'lr': args.lr  if train_weight else 0},
         {'params': quant, 'weight_decay': 0., 'lr': args.lr_quant if train_quant else 0},
         {'params': bnbias, 'weight_decay': 0., 'lr': args.lr_bn if train_bnbias else 0},
-        {'params': theta, 'weight_decay': 0., 'lr': args.lr_theta if train_theta else 0},
+        {'params': theta_w, 'weight_decay': 0., 'lr': args.lr_w_theta if train_w_theta else 0},
+        {'params': theta_a, 'weight_decay': 0., 'lr': args.lr_a_theta if train_a_theta else 0},
         {'params': skip, 'weight_decay': 0, 'lr': 0},
     ], momentum=args.momentum, nesterov=True)
     return optimizer
@@ -235,8 +233,15 @@ def categorize_param(model):
     weight = []
     quant = []
     bnbias = []
-    theta = []
+    theta_w = []
+    theta_a = []
     skip = []
+    for name, module in model.named_modules():
+        if isinstance(module, (QuantOps.Conv2d, QuantOps.Linear)):
+            theta_w.append(module.theta)
+        elif isinstance(module, (QuantOps.ReLU, QuantOps.ReLU6, QuantOps.Sym)):
+            theta_a.append(module.theta)
+        
     for name, param in model.named_parameters():
         if name.endswith(".a") or name.endswith(".b") \
             or name.endswith(".c") or name.endswith(".d"):
@@ -244,10 +249,11 @@ def categorize_param(model):
         elif len(param.shape) == 1 and ((name.endswith('weight') or name.endswith(".bias"))):
             bnbias.append(param)
         elif name.endswith(".theta"):
-            theta.append(param)
+            pass
+            #theta.append(param)
         else:
             weight.append(param)
-    return (weight, quant, bnbias, theta, skip,)
+    return (weight, quant, bnbias, theta_w, theta_a, skip,)
 
 
 
@@ -346,8 +352,13 @@ if torch.cuda.device_count() > 1:
 
 
 # optimizer & scheduler
+
+
+        
+    
+
 params = categorize_param(model)
-optimizer = get_optimizer(params, True, True, True, True)
+optimizer = get_optimizer(params, True, True, True, True, True)
 current_lr = -1
 
 scheduler = CosineWithWarmup(optimizer, 
@@ -401,7 +412,7 @@ def train(epoch, phase=None):
         if args.lb_mode and optimizer.param_groups[3]['lr'] != 0 :#(epoch-1) % (args.w_ep + args.t_ep) >= args.w_ep:
             if not isinstance(bitops, (float, int)):
                 bitops = bitops.mean()
-            loss_bitops = F.relu((bitops - bitops_target) * alpha).reshape(torch.Size([]))
+            loss_bitops = F.relu((bitops - bitops_target)/bitops_target * alpha).reshape(torch.Size([]))
             loss += loss_bitops 
             eval_bitops_loss.update(loss_bitops.item(), inputs.size(0))
 
@@ -490,7 +501,7 @@ def eval(epoch):
             if args.lb_mode:
                 if not isinstance(bitops, (float, int)):
                     bitops = bitops.mean()
-                loss_bitops = F.relu((bitops - bitops_target) * alpha).reshape(torch.Size([]))
+                loss_bitops = F.relu((bitops - bitops_target)/bitops_target * alpha).reshape(torch.Size([]))
                 loss += loss_bitops 
                 eval_bitops_loss.update(loss_bitops.item(), inputs.size(0))
                 if (batch_idx) % (args.log_interval*5) == 0:
