@@ -64,10 +64,14 @@ parser.add_argument('--grad_scale', action='store_true')
 #parser.add_argument('--lr_q_scale', default=1, type=float, help='lr_quant = args.lr * args.lr_q_scale')
 parser.add_argument('--tau_init', default=1, type=float, help='softmax tau (initial)')
 parser.add_argument('--tau_target', default=1, type=float, help='softmax tau (final)')
-parser.add_argument('--tau_type', default='linear', type=str, help='softmax tau annealing type [linear, exponential, cosine]')
+parser.add_argument('--tau_type', default='linear', type=str, help='softmax tau annealing type [linear, exponential, cosine, exp_cyclic]')
 parser.add_argument('--alpha_init', default=1e-10, type=float, help='bitops scaling factor (initial)')
 parser.add_argument('--alpha_target', default=1e-10, type=float, help='bitops scaling factor (final)')
 parser.add_argument('--alpha_type', default='linear', type=str, help='bitops scaling factor annealing type [linear, exponential, cosine]')
+parser.add_argument('--cycle_epoch', default=5, type=int, help='Training Cycle size until changing target compression')
+parser.add_argument('--temp_step', default=1e-2, type=float, help='Exp factor of the temperature decay')
+parser.add_argument('--n_gumbel', default=25, type=int, help='Number until rounding of single temperature step')
+
 
 
 args = parser.parse_args()
@@ -216,7 +220,7 @@ model = model.to(device)
 
 # optimizer -> for further coding (got from PROFIT)
 def get_optimizer(params, train_weight, train_quant, train_bnbias, train_w_theta, train_a_theta):
-    global lr_quant
+    #global lr_quant
     (weight, quant, bnbias, theta_w, theta_a, skip) = params
     optimizer = optim.SGD([
         {'params': weight, 'weight_decay': args.decay, 'lr': args.lr  if train_weight else 0},
@@ -369,7 +373,9 @@ criterion = nn.CrossEntropyLoss()
 
 w_module_nums = [4, 32, 36, 39, 123, 127, 130] if len(args.w_bit) > 1 else []
 a_module_nums = [6, 30, 34, 38, 121, 125, 129] if len(args.a_bit) > 1 else []
-
+temp_func = get_exp_cyclic_annealing_tau(args.cycle_epoch * len(train_loader),
+                                         args.temp_step,
+                                         np.round(len(train_loader) / args.n_gumbel))
 
 # Training
 def train(epoch, phase=None):
@@ -383,10 +389,14 @@ def train(epoch, phase=None):
     eval_bitops_loss = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
-    current_lr = optimizer.param_groups[0]['lr']
+    #current_lr = optimizer.param_groups[0]['lr']
     
     end = t0 = time.time()
     for batch_idx, (inputs, targets) in enumerate(train_loader):
+        tau_p = tau
+        tau = temp_func((epoch - 1) * len(train_loader) + batch_idx)
+        if tau_p != tau:
+            set_tau(QuantOps, model, tau)
         '''
         if args.lb_mode and args.alternate:
             if batch_idx % 1000 == 0: # learning weight
@@ -426,6 +436,7 @@ def train(epoch, phase=None):
 
         model_time = time.time()
         if (batch_idx) % args.log_interval == 0:
+            tau = temp_func(batch_idx)
             logging.info('Train Epoch: %4d Process: %5d/%5d  ' + \
                     'L_acc: %.3f | L_bitops: %.3f | top1.avg: %.3f%% | top5.avg: %.3f%% | ' +  \
                     'Data Time: %.3f s | Model Time: %.3f s',   # \t Memory %.03fMB',
@@ -465,8 +476,8 @@ def train(epoch, phase=None):
                 f_.close()
         end = time.time()
 
-    optimizer.param_groups[0]['lr'] = current_lr
-    optimizer.param_groups[3]['lr'] = current_lr 
+    #optimizer.param_groups[0]['lr'] = current_lr
+    #optimizer.param_groups[3]['lr'] = current_lr 
     if args.lb_mode:
         _, _, str_select, str_prob = extract_bitwidth(model, weight_or_act="weight", tau=tau)
         logging.info(f'Epoch {epoch}, weight bitwidth selection \n' + \
@@ -552,15 +563,15 @@ if __name__ == '__main__':
                                         args.save, args.exp)
         
         for epoch in range(last_epoch+1, end_epoch+1):
-            tau, string = get_tau(args.tau_init, args.tau_target, args.epochs, epoch, args.tau_type)
-            logging.info(string)
-
             alpha, string = get_alpha(args.alpha_init, args.alpha_target, args.epochs, epoch, args.alpha_type)
             logging.info(string)
-            
-            for module in model.modules():
-                if isinstance(module, (QuantOps.Conv2d, QuantOps.ReLU, QuantOps.Sym, QuantOps.Linear, QuantOps.ReLU6)):
-                    module.tau = tau
+            if args.tau_type == "exp_cyclic":
+                pass
+            else:
+                tau, string = get_tau(args.tau_init, args.tau_target, args.epochs, epoch, args.tau_type)
+                logging.info(string)
+                set_tau(QuantOps, model, tau)
+
             logging.info('Epoch: %d/%d Best_Acc: %.3f' %(epoch, end_epoch, best_acc))
             train(epoch, phase='Search')
             eval(epoch)

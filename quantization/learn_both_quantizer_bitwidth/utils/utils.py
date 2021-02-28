@@ -10,6 +10,7 @@ import glob
 import torch
 import torch.nn as nn
 import torch.nn.init as init
+import numpy as np
 
 
 class AverageMeter(object):
@@ -323,7 +324,10 @@ def get_tau(tau_init, tau_target, total_epoch, cur_epoch, scaling_type):
         tau = tau_target + 1/2*(tau_init-tau_target)*(1 + math.cos(math.pi * (cur_epoch-1)/(total_epoch-1)))
     elif scaling_type == "linear":
         tau = tau_init - (cur_epoch-1) * (tau_init - tau_target) / (total_epoch-1)
+    elif scaling_type == "exp_cyclic":
+        raise ValueError
     string_to_log = f"[Epoch {cur_epoch}] tau   = {tau:.4f} (init = {tau_init:.2f} -> target = {tau_target:.2f})"
+
     return tau, string_to_log
 
 
@@ -336,4 +340,27 @@ def get_alpha(tau_init, tau_target, total_epoch, cur_epoch, scaling_type):
     elif scaling_type == "linear":
         tau = tau_init - (cur_epoch-1) * (tau_init - tau_target) / (total_epoch-1)
     string_to_log = f"[Epoch {cur_epoch}] alpha = {tau:.4e} (init = {tau_init:.2e} -> target = {tau_target:.2e})"
+    
     return tau, string_to_log
+
+
+def get_exp_cyclic_annealing_tau(cycle_size_iter, temp_step, n, tau_init=1):
+    """
+    This function return the exp annealing function for the gumbel softmax.
+    :param cycle_size_iter: integer that defies the cycle size
+    :param temp_step: the step size coefficient
+    :param n: a float scaling of the iteration index
+    :return: a function which get an index and return a floating temperature value
+    """
+    def temp_func(i):
+        if i < 0:
+            return 1 #tau_init
+        i = i % cycle_size_iter
+        return np.maximum(0.5, 1 * np.exp(-temp_step * np.round(i / n))) #tau_init
+    
+    return temp_func
+    
+def set_tau(QuantOps, model, tau):
+    for module in model.modules():
+        if isinstance(module, (QuantOps.Conv2d, QuantOps.ReLU, QuantOps.Sym, QuantOps.Linear, QuantOps.ReLU6)):
+            module.tau = tau
