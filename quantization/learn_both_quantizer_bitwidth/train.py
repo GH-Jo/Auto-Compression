@@ -76,6 +76,16 @@ parser.add_argument('--n_gumbel', default=25, type=int, help='Number until round
 
 args = parser.parse_args()
 
+#------------ For debuging and testing ------------
+
+args.stop_step = 200
+#args.lr_a_theta = 0.01
+#args.lr_w_theta = 0.01
+#args.batchsize = 8
+
+#--------------------------------------------------
+
+
 if args.exp == 'test':
     args.save = f'logs/{args.dataset}/{args.exp}-{time.strftime("%y%m%d-%H%M%S")}'
 else:
@@ -167,21 +177,65 @@ elif args.quant_op == 'duq_init_change':
 else:
     raise NotImplementedError
 
+
 # calculate bitops for full precision
-def get_bitops_total():
+def get_bitops_fullp(idx=-1):
     model_ = mobilenet_v2(QuantOps)
     model_ = model_.to(device)
     if args.dataset in ["cifar100", "cifar10"]:
         input = torch.randn([1,3,32,32]).cuda()
     else:
         input = torch.randn([1,3,224,224]).cuda()
-    model_.eval()
+    model_.train()
     QuantOps.initialize(model_, train_loader, 32, weight=True)
     QuantOps.initialize(model_, train_loader, 32, act=True)
-    _, bitops = model_(input)
-    return bitops
+    model_.eval()    
+    return get_bitops(model_, idx)
 
 
+# calculate bitops (theta-weighted)
+def get_bitops(model, idx=-1):
+    a_bit_list = [32]
+    w_bit_list = []
+    computation_list = []
+    
+    for module in model.modules():
+        if isinstance(module, (Q_ReLU, Q_Sym, Q_HSwish)):
+            if isinstance(module.bits, int) :
+                a_bit_list.append(module.bits)
+            else:
+                softmask = F.softmax(module.theta/tau, dim=0)
+                a_bit_list.append((softmask * module.bits).sum())
+
+        elif isinstance(module, (Q_Conv2d, Q_Linear)):
+            if isinstance(module.bits, int) :
+                w_bit_list.append(module.bits)
+            else:
+                softmask = F.softmax(module.theta/tau, dim=0)
+                w_bit_list.append((softmask * module.bits).sum())
+                
+            computation_list.append(module.computation)
+    cost = Tensor([0]).cuda()
+    if idx < 0:
+        for i in range(len(a_bit_list)):
+            try:
+                cost += a_bit_list[i] * w_bit_list[i] * computation_list[i]
+            except Exception as e:
+                print(computation_list[i].device())
+                print(w_bit_list[i].device())
+                print(a_bit_list[i].device())
+                exit()
+            
+
+    else:
+        cost = a_bit_list[idx] * w_bit_list[idx] * computation_list[idx]
+    #if idx < 0:
+    #    cost = (Tensor(a_bit_list) * Tensor(w_bit_list) * Tensor(computation_list)).sum(dim=0, keepdim=True)
+    
+    return cost
+
+
+"""
 def get_bitops(model_, device):
     if args.dataset in ["cifar100", "cifar10"]:
         input = torch.randn([1,3,32,32]).to(device)
@@ -191,16 +245,17 @@ def get_bitops(model_, device):
     _, bitops = model_(input)
 
     return bitops
-
+"""
 
 print("==> Calculate bitops..")
 if args.fasttest:
     bitops_total = 307992854528
+    bitops_first_layer = 11098128384
 if not args.fasttest:
-    bitops_total = get_bitops_total()
-bitops_first_layer = 11098128384
+    bitops_total = get_bitops_fullp().cpu()
+    bitops_first_layer = get_bitops_fullp(0).cpu()
 bitops_target = ((bitops_total - bitops_first_layer) * (args.w_target_bit/32.) * (args.a_target_bit/32.) +\
-                 (bitops_first_layer * (args.w_target_bit/32.)))
+                 (bitops_first_layer * (args.w_target_bit/32.)))                 
 logging.info(f'bitops_total : {int(bitops_total):d}')
 logging.info(f'bitops_target: {int(bitops_target):d}')
 #logging.info(f'bitops_wrong : {int(bitops_total * (args.w_target_bit/32.) * (args.a_target_bit/32.)):d}')
@@ -357,10 +412,6 @@ if torch.cuda.device_count() > 1:
 
 # optimizer & scheduler
 
-
-        
-    
-
 params = categorize_param(model)
 optimizer = get_optimizer(params, True, True, True, True, True)
 current_lr = -1
@@ -376,6 +427,11 @@ a_module_nums = [6, 30, 34, 38, 121, 125, 129] if len(args.a_bit) > 1 else []
 temp_func = get_exp_cyclic_annealing_tau(args.cycle_epoch * len(train_loader),
                                          args.temp_step,
                                          np.round(len(train_loader) / args.n_gumbel))
+
+_, _, _, str_prob = extract_bitwidth(model, weight_or_act=0)
+print(str_prob)
+_, _, _, str_prob = extract_bitwidth(model, weight_or_act=1)
+print(str_prob)
 
 # Training
 def train(epoch, phase=None):
@@ -393,6 +449,8 @@ def train(epoch, phase=None):
     
     end = t0 = time.time()
     for batch_idx, (inputs, targets) in enumerate(train_loader):
+        #if batch_idx > args.stop_step:
+        #    break
         tau_p = tau
         tau = temp_func((epoch - 1) * len(train_loader) + batch_idx)
         if tau_p != tau:
@@ -414,16 +472,18 @@ def train(epoch, phase=None):
 
         inputs, targets = inputs.to(device), targets.to(device)
         data_time = time.time()
-        outputs, bitops = model(inputs)
+        outputs = model(inputs)
+        bitops = get_bitops(model)
 
         loss = criterion(outputs, targets)
         eval_acc_loss.update(loss.item(), inputs.size(0))
         
         if args.lb_mode and optimizer.param_groups[3]['lr'] != 0 :#(epoch-1) % (args.w_ep + args.t_ep) >= args.w_ep:
-            if not isinstance(bitops, (float, int)):
-                bitops = bitops.mean()
+            #if not isinstance(bitops, (float, int)):
+            #    bitops = bitops.mean()
             loss_bitops = F.relu((bitops - bitops_target)/bitops_target * alpha).reshape(torch.Size([]))
             loss += loss_bitops 
+            #loss = loss_bitops
             eval_bitops_loss.update(loss_bitops.item(), inputs.size(0))
 
         acc1, acc5 = accuracy(outputs.data, targets.data, top_k=(1,5))
@@ -502,16 +562,18 @@ def eval(epoch):
 
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(val_loader):
-            
+            #if batch_idx > args.stop_step:
+            #    break
             inputs, targets = inputs.to(device), targets.to(device)
 
-            outputs, bitops = model(inputs)
+            outputs = model(inputs)
             loss = criterion(outputs, targets)
+            bitops = get_bitops(model)
             eval_acc_loss.update(loss.item(), inputs.size(0))
 
             if args.lb_mode:
-                if not isinstance(bitops, (float, int)):
-                    bitops = bitops.mean()
+                #if not isinstance(bitops, (float, int)):
+                #    bitops = bitops.mean()
                 loss_bitops = F.relu((bitops - bitops_target)/bitops_target * alpha).reshape(torch.Size([]))
                 loss += loss_bitops 
                 eval_bitops_loss.update(loss_bitops.item(), inputs.size(0))

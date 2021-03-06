@@ -71,7 +71,7 @@ class Q_ReLU(nn.Module):
         
         if len(self.bits)==1 and self.bits[0]==32:
             #print("Q_ReLU")
-            return x, 32
+            return x#, 32
         else:
             a = F.softplus(self.a)
             c = F.softplus(self.c)
@@ -93,8 +93,8 @@ class Q_ReLU(nn.Module):
 
             x = F.hardtanh(x / a_mean, 0, 1)
             x_bar = RoundQuant.apply(x, n_lv_mean) * c_mean
-            act_size = (softmask * self.bits).sum()
-            return x_bar, act_size
+            #act_size = (softmask * self.bits).sum()
+            return x_bar#, act_size
 
         
 class Q_ReLU6(Q_ReLU):
@@ -153,7 +153,7 @@ class Q_Sym(nn.Module):
     def forward(self, x):
         if len(self.bits)==1 and self.bits[0]==32:
             #print("Q_Sym")
-            return x, 32
+            return x#, 32
         else:
             a = F.softplus(self.a)
             c = F.softplus(self.c)
@@ -174,8 +174,8 @@ class Q_Sym(nn.Module):
 
             x = F.hardtanh(x / a_mean, -1, 1)
             x_bar = RoundQuant.apply(x, torch.round(n_lv_mean / 2)) * c_mean
-            act_size = (softmask * self.bits).sum()
-            return x_bar, act_size
+            #act_size = (softmask * self.bits).sum()
+            return x_bar#, act_size
 
 
 ################## didn't modify Q_HSwish #################
@@ -261,20 +261,20 @@ class Q_Conv2d(nn.Conv2d):
 
         w_bar = F.hardtanh(self.weight / a_mean, -1, 1)
         w_bar = RoundQuant.apply(w_bar, torch.round(n_lv_mean / 2)) * c_mean
-        bitwidth = (softmask * self.bits).sum()
-        return w_bar, bitwidth
+        #bitwidth = (softmask * self.bits).sum()
+        return w_bar#, bitwidth
 
-    def forward(self, x, cost, act_size=None):
+    def forward(self, x):#, cost, act_size=None):
         if len(self.bits)==1 and self.bits[0]==32:
             #print("Q_Conv2d")
-            cost += act_size * 32 * self.computation
+            #cost += act_size * 32 * self.computation
             return F.conv2d(x, self.weight, self.bias,
-                self.stride, self.padding, self.dilation, self.groups), cost
+                self.stride, self.padding, self.dilation, self.groups)#, cost
         else:
-            weight, bitwidth = self._weight_quant()
-            cost += act_size * bitwidth * self.computation
+            weight = self._weight_quant() #, bitwidth
+            #cost += act_size * bitwidth * self.computation
             return F.conv2d(x, weight, self.bias,
-                self.stride, self.padding, self.dilation, self.groups), cost
+                self.stride, self.padding, self.dilation, self.groups)#, cost
 
 
 class Q_Linear(nn.Linear):
@@ -326,19 +326,19 @@ class Q_Linear(nn.Linear):
 
         w_bar = F.hardtanh(self.weight / a_mean, -1, 1)
         w_bar = RoundQuant.apply(w_bar, torch.round(n_lv_mean / 2)) * c_mean
-        bitwidth = (softmask * self.bits).sum()
-        return w_bar, bitwidth
+        #bitwidth = (softmask * self.bits).sum()
+        return w_bar#, bitwidth
     
 
-    def forward(self, x, cost, act_size=None):
+    def forward(self, x):#, cost, act_size=None):
         if len(self.bits)==1 and self.bits[0]==32:
             #print("Q_Linear")
-            cost += act_size * 32 * self.computation
-            return F.linear(x, self.weight, self.bias), cost
+            #cost += act_size * 32 * self.computation
+            return F.linear(x, self.weight, self.bias)#, cost
         else:
-            weight, bitwidth = self._weight_quant()
-            cost += act_size * bitwidth * self.computation
-            return F.linear(x, weight, self.bias), cost
+            weight = self._weight_quant() #, bitwidth
+            #cost += act_size * bitwidth * self.computation
+            return F.linear(x, weight, self.bias)#, cost
 
 
 class Q_Conv2dPad(Q_Conv2d):
@@ -412,6 +412,7 @@ def initialize(model, loader, bits, act=False, weight=False, eps=0.05):
         hooks.append(hook)
 
     model.train()
+    model.cuda()
     for i, (input, target) in enumerate(loader):
         with torch.no_grad():
             if isinstance(model, nn.DataParallel):
@@ -441,12 +442,16 @@ def sample_search_result(model, hard=True, print=True):
 
 
 def extract_bitwidth(model, weight_or_act=None, tau=1):
-    if weight_or_act == "weight":
+    assert weight_or_act != None
+    if weight_or_act == "weight" or weight_or_act == 0:
         i = 1
         module_set = (Q_Conv2d, Q_Linear)
-    elif weight_or_act == "act":
+    elif weight_or_act == "act" or weight_or_act == 1:
         i = 2
         module_set = (Q_ReLU, Q_Sym, Q_HSwish)
+    else:
+        print(f'[ValueError] weight_or_act: {weight_or_act}')
+        raise ValueError
     
     list_select = []
     list_prob = []

@@ -82,64 +82,11 @@ class InvertedResidual(nn.Module):
         ])
         self.conv = ops.Sequential(*layers)
 
-    def forward(self, x, cost, act_size=None):
+    def forward(self, x):
         if self.use_res_connect:
-            #print('residual block ----')
-            #print(self.conv[0])
-            x_identity = x 
-            x, act_size = self.conv[0](x)
-
-            x, cost = self.conv[1][0](x, cost, act_size)
-            x = self.conv[1][1](x)
-            x, act_size = self.conv[1][2](x)
-
-            x, cost = self.conv[2][0](x, cost, act_size)
-            x = self.conv[2][1](x)
-            x, act_size = self.conv[2][2](x)
-
-            x, cost = self.conv[3](x, cost, act_size)
-            x = self.conv[4](x)
-            return x_identity + x, cost
-
+            return x + self.conv(x)
         else:
-            if isinstance(self.conv[0], Q_Sym):
-                try:
-                    x, act_size = self.conv[0](x)
-                except Exception as e:
-                    print('Q_Sym output error')
-                    print(type(self.conv[0](x)))
-                    print(self.conv[0](x).shape)
-                    exit()
-
-                x, cost = self.conv[1][0](x, cost, act_size)
-                x = self.conv[1][1](x)
-                x, act_size = self.conv[1][2](x)
-
-                x, cost = self.conv[2][0](x, cost, act_size)
-                x = self.conv[2][1](x)
-                x, act_size = self.conv[2][2](x)
-
-                x, cost = self.conv[3](x, cost, act_size)
-                x = self.conv[4](x)
-            
-            else:
-                x, cost = self.conv[0][0](x, cost, act_size)
-                x = self.conv[0][1](x)
-                x, act_size = self.conv[0][2](x)
-
-                x, cost = self.conv[1](x, cost, act_size)
-                x = self.conv[2](x)
-            
-            # 1. filter ops.Sym 
-            #   isinstance(self.conv[0], Q_Sym)
-            # 2. process first / second convbnrelu
-            #   1) [:1] : conv, input={x, accum_cost, act_size}, output={x, accum_cost}
-            #   2) [1:] : bn-relu, input={x}, output={x, act_size}
-            # 3. process third conv-bn
-            #   1) [:1] : conv, input={x, accum_cost, act_size}, output={x, accum_cost}
-            #   2) [1:] : bn, input={x}, output={x}
-            return x, cost
-
+            return self.conv(x)
 
 class MobileNetV2(nn.Module):
     def __init__(self,
@@ -232,11 +179,42 @@ class MobileNetV2(nn.Module):
                 nn.init.normal_(m.weight, 0, 0.01)
                 nn.init.zeros_(m.bias)
 
-    # method 1: cost passing with indexing
+    def _forward(self, x):
+        x = self.features(x)
+        x = F.relu(x, inplace=True)
+        x = x.mean([2, 3])
+        x = self.relu6(x)
+        x = self.classifier(x)
+        return x
+
+    # Allow for accessing forward method in a inherited class
+    forward = _forward
+
+
+def mobilenet_v2(ops, pretrained=False, progress=True, **kwargs):
+    """
+    Constructs a MobileNetV2 architecture from
+    `"MobileNetV2: Inverted Residuals and Linear Bottlenecks" <https://arxiv.org/abs/1801.04381>`_.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    model = MobileNetV2(ops, **kwargs)
+    if pretrained:
+        state_dict = load_state_dict_from_url(model_urls['mobilenet_v2'],
+                                              progress=progress)
+        model.load_state_dict(state_dict)
+    return model
+
+
+# from class MobileNetV2
+    # modified forward: cost passing with indexing
+    '''
     def _forward(self, x):
         # first conv
         act_size = 32
         cost = torch.Tensor([0]).cuda()
+        
         x, cost = self.features[0][0](x, cost, act_size)
         x = self.features[0][1](x)
         #np.save('0222_lbq_output.npy', x.cpu().detach())
@@ -260,33 +238,69 @@ class MobileNetV2(nn.Module):
         x = self.classifier[0](x)
         x, cost = self.classifier[1](x, cost, act_size)
         return x, cost
-
-
-    '''
-    # original forward 
-    def _forward(self, x):
-        x = self.features(x)
-        x = F.relu(x, inplace=True)
-        x = x.mean([2, 3])
-        x = self.relu6(x)
-        x = self.classifier(x)
     '''
 
-    # Allow for accessing forward method in a inherited class
-    forward = _forward
 
 
-def mobilenet_v2(ops, pretrained=False, progress=True, **kwargs):
-    """
-    Constructs a MobileNetV2 architecture from
-    `"MobileNetV2: Inverted Residuals and Linear Bottlenecks" <https://arxiv.org/abs/1801.04381>`_.
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-        progress (bool): If True, displays a progress bar of the download to stderr
-    """
-    model = MobileNetV2(ops, **kwargs)
-    if pretrained:
-        state_dict = load_state_dict_from_url(model_urls['mobilenet_v2'],
-                                              progress=progress)
-        model.load_state_dict(state_dict)
-    return model
+
+# from class InvertedResidual
+    '''
+    def forward(self, x, cost, act_size=None):
+        if self.use_res_connect:
+            #print('residual block ----')
+            #print(self.conv[0])
+            x_identity = x 
+            x, act_size = self.conv[0](x)
+
+            x, cost = self.conv[1][0](x, cost, act_size)
+            x = self.conv[1][1](x)
+            x, act_size = self.conv[1][2](x)
+
+            x, cost = self.conv[2][0](x, cost, act_size)
+            x = self.conv[2][1](x)
+            x, act_size = self.conv[2][2](x)
+
+            x, cost = self.conv[3](x, cost, act_size)
+            x = self.conv[4](x)
+            return x_identity + x, cost
+
+        else:
+            if isinstance(self.conv[0], Q_Sym):
+                try:
+                    x, act_size = self.conv[0](x)
+                except Exception as e:
+                    print('Q_Sym output error')
+                    print(type(self.conv[0](x)))
+                    print(self.conv[0](x).shape)
+                    exit()
+
+                x, cost = self.conv[1][0](x, cost, act_size)
+                x = self.conv[1][1](x)
+                x, act_size = self.conv[1][2](x)
+
+                x, cost = self.conv[2][0](x, cost, act_size)
+                x = self.conv[2][1](x)
+                x, act_size = self.conv[2][2](x)
+
+                x, cost = self.conv[3](x, cost, act_size)
+                x = self.conv[4](x)
+            
+            else:
+                x, cost = self.conv[0][0](x, cost, act_size)
+                x = self.conv[0][1](x)
+                x, act_size = self.conv[0][2](x)
+
+                x, cost = self.conv[1](x, cost, act_size)
+                x = self.conv[2](x)
+            
+            # 1. filter ops.Sym 
+            #   isinstance(self.conv[0], Q_Sym)
+            # 2. process first / second convbnrelu
+            #   1) [:1] : conv, input={x, accum_cost, act_size}, output={x, accum_cost}
+            #   2) [1:] : bn-relu, input={x}, output={x, act_size}
+            # 3. process third conv-bn
+            #   1) [:1] : conv, input={x, accum_cost, act_size}, output={x, accum_cost}
+            #   2) [1:] : bn, input={x}, output={x}
+            return x, cost
+    '''
+
