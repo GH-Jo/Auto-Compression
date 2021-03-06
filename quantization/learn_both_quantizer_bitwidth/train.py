@@ -252,14 +252,16 @@ if args.fasttest:
     bitops_total = 307992854528
     bitops_first_layer = 11098128384
 if not args.fasttest:
-    bitops_total = get_bitops_fullp().cpu()
-    bitops_first_layer = get_bitops_fullp(0).cpu()
+    bitops_total = get_bitops_fullp().item()
+    bitops_first_layer = get_bitops_fullp(0).item()
 bitops_target = ((bitops_total - bitops_first_layer) * (args.w_target_bit/32.) * (args.a_target_bit/32.) +\
-                 (bitops_first_layer * (args.w_target_bit/32.)))                 
+                 (bitops_first_layer * (args.w_target_bit/32.)))
+
 logging.info(f'bitops_total : {int(bitops_total):d}')
 logging.info(f'bitops_target: {int(bitops_target):d}')
 #logging.info(f'bitops_wrong : {int(bitops_total * (args.w_target_bit/32.) * (args.a_target_bit/32.)):d}')
-
+if type(bitops_target) != float:
+    bitops_target = float(bitops_target)
 
 # model
 if args.model == "mobilenetv2":
@@ -474,6 +476,7 @@ def train(epoch, phase=None):
         data_time = time.time()
         outputs = model(inputs)
         bitops = get_bitops(model)
+
 
         loss = criterion(outputs, targets)
         eval_acc_loss.update(loss.item(), inputs.size(0))

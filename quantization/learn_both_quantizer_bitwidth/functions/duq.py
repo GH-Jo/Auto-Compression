@@ -21,7 +21,10 @@ class RoundQuant(torch.autograd.Function):
     def backward(ctx, grad_output):
         return grad_output, None
 
-
+def softmax_init(bits):
+    degree = 4
+    theta = (bits ** degree)/(bits ** degree).sum
+    return theta 
 """
 @inproceedings{
     esser2020learned,
