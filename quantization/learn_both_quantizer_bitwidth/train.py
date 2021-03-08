@@ -394,7 +394,7 @@ with torch.no_grad():
         logging.info(str_sel)
 
         model = model.to(device)
-        logging.info(f"## sampled model bitops: {int(get_bitops(model, device).item())}")
+        logging.info(f"## sampled model bitops: {int(get_bitops(model).item())}")
 
     
     # Bitwidth searching or uniform QAT
