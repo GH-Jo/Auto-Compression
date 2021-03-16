@@ -326,7 +326,7 @@ def get_tau(tau_init, tau_target, total_epoch, cur_epoch, scaling_type):
         tau = tau_init - (cur_epoch-1) * (tau_init - tau_target) / (total_epoch-1)
     elif scaling_type == "exp_cyclic":
         raise ValueError
-    string_to_log = f"[Epoch {cur_epoch}] tau   = {tau:.4f} (init = {tau_init:.2f} -> target = {tau_target:.2f})"
+    string_to_log = f"tau   = {tau:.4f} (init = {tau_init:.2f} -> target = {tau_target:.2f})"
 
     return tau, string_to_log
 
@@ -354,13 +354,25 @@ def get_exp_cyclic_annealing_tau(cycle_size_iter, temp_step, n, tau_init=1):
     """
     def temp_func(i):
         if i < 0:
-            return 1 #tau_init
+            return 1.0 #tau_init
         i = i % cycle_size_iter
         return np.maximum(0.5, 1 * np.exp(-temp_step * np.round(i / n))) #tau_init
     
     return temp_func
-    
+
+
+#def get_linear_annealing_tau(cycle_size_iter, temp_step, n, tau_init=1, tau_target=0.2):
+#    def temp_func(i):
+#        if i < 0:
+#            return 1.0
+#        i = 
+
 def set_tau(QuantOps, model, tau):
     for module in model.modules():
         if isinstance(module, (QuantOps.Conv2d, QuantOps.ReLU, QuantOps.Sym, QuantOps.Linear, QuantOps.ReLU6)):
             module.tau = tau
+
+def remove_gumbel(QuantOps, model):
+    for module in model.modules():
+        if isinstance(module, (QuantOps.Conv2d, QuantOps.ReLU, QuantOps.Sym, QuantOps.Linear, QuantOps.ReLU6)):
+            module.gumbel_noise = False

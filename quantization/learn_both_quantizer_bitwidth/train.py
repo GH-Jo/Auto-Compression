@@ -1,6 +1,7 @@
 import argparse
 import locale
 import logging
+import wandb
 import os
 import random
 import time
@@ -19,9 +20,12 @@ from functions import *
 from models import *
 from models.MobileNetV2_quant import mobilenet_v2
 from utils import *
+from optimizer.radam import RAdam
 import math
 
 parser = argparse.ArgumentParser(description='PyTorch - Learning Quantization')
+parser.add_argument('--log_dir', type=str, default='/home/lkj004124/wandb_logs/',
+                        help='Weights and Bias logging folder path')
 parser.add_argument('--model', default='mobilenetv2', help='select model')
 parser.add_argument('--dir', default='/data', help='data root')
 parser.add_argument('--dataset', default='imagenet', help='select dataset')
@@ -35,7 +39,7 @@ parser.add_argument("--lr_bn", default=0.005, type=float)
 parser.add_argument('--warmup', default=3, type=int)
 parser.add_argument('--epochs', default=15, type=int)
 
-parser.add_argument('--log_interval', default=100, type=int, help='logging interval')
+parser.add_argument('--log_interval', default=5, type=int, help='logging interval')
 parser.add_argument('--exp', default='test', type=str)
 parser.add_argument('--seed', default=7, type=int, help='random seed')
 parser.add_argument("--quant_op", required=True)
@@ -63,7 +67,7 @@ parser.add_argument('--fasttest', action='store_true')
 parser.add_argument('--grad_scale', action='store_true')
 #parser.add_argument('--lr_q_scale', default=1, type=float, help='lr_quant = args.lr * args.lr_q_scale')
 parser.add_argument('--tau_init', default=1, type=float, help='softmax tau (initial)')
-parser.add_argument('--tau_target', default=1, type=float, help='softmax tau (final)')
+parser.add_argument('--tau_target', default=0.2, type=float, help='softmax tau (final)')
 parser.add_argument('--tau_type', default='linear', type=str, help='softmax tau annealing type [linear, exponential, cosine, exp_cyclic]')
 parser.add_argument('--alpha_init', default=1e-10, type=float, help='bitops scaling factor (initial)')
 parser.add_argument('--alpha_target', default=1e-10, type=float, help='bitops scaling factor (final)')
@@ -71,27 +75,29 @@ parser.add_argument('--alpha_type', default='linear', type=str, help='bitops sca
 parser.add_argument('--cycle_epoch', default=5, type=int, help='Training Cycle size until changing target compression')
 parser.add_argument('--temp_step', default=1e-2, type=float, help='Exp factor of the temperature decay')
 parser.add_argument('--n_gumbel', default=25, type=int, help='Number until rounding of single temperature step')
-
-
-
+parser.add_argument('--optimizer', default='SGD', help='loss function optimizer [SGD, RAdam]')
+parser.add_argument('--gumbel_epochs', default=15, type=int, help='Number of early epochs that use gumbel noise')
+parser.add_argument('--tau_end', action='store_true', help='After gumbel_epochs, decrease tau linearly')
 args = parser.parse_args()
 
 #------------ For debuging and testing ------------
 
-args.stop_step = 200
+args.stop_step = 1
 #args.lr_a_theta = 0.01
 #args.lr_w_theta = 0.01
 #args.batchsize = 8
 
 #--------------------------------------------------
+PROJECT_NAME = 'LBQ'
 
 
 if args.exp == 'test':
-    args.save = f'logs/{args.dataset}/{args.exp}-{time.strftime("%y%m%d-%H%M%S")}'
-else:
-    args.save = f'logs/{args.dataset}/{args.exp}' #-{time.strftime("%y%m%d-%H%M%S")}'
+    args.exp = f'{args.exp}-{time.strftime("%y%m%d-%H%M%S")}'
+args.save = f'logs/{args.dataset}/{args.exp}' 
 
-#args.bitops_scaledown=1e-09
+wandb.init(project=PROJECT_NAME, dir=args.log_dir, id=args.exp)
+wandb.config.update(args)
+
 args.workers = 8
 args.momentum = 0.9   # momentum value
 args.decay = 5e-4 # weight decay value
@@ -279,14 +285,26 @@ model = model.to(device)
 def get_optimizer(params, train_weight, train_quant, train_bnbias, train_w_theta, train_a_theta):
     #global lr_quant
     (weight, quant, bnbias, theta_w, theta_a, skip) = params
-    optimizer = optim.SGD([
-        {'params': weight, 'weight_decay': args.decay, 'lr': args.lr  if train_weight else 0},
-        {'params': quant, 'weight_decay': 0., 'lr': args.lr_quant if train_quant else 0},
-        {'params': bnbias, 'weight_decay': 0., 'lr': args.lr_bn if train_bnbias else 0},
-        {'params': theta_w, 'weight_decay': 0., 'lr': args.lr_w_theta if train_w_theta else 0},
-        {'params': theta_a, 'weight_decay': 0., 'lr': args.lr_a_theta if train_a_theta else 0},
-        {'params': skip, 'weight_decay': 0, 'lr': 0},
-    ], momentum=args.momentum, nesterov=True)
+    if args.optimizer.lower() == 'sgd':
+        optimizer = optim.SGD([
+            {'params': weight, 'weight_decay': args.decay, 'lr': args.lr  if train_weight else 0},
+            {'params': quant, 'weight_decay': 0., 'lr': args.lr_quant if train_quant else 0},
+            {'params': bnbias, 'weight_decay': 0., 'lr': args.lr_bn if train_bnbias else 0},
+            {'params': theta_w, 'weight_decay': 0., 'lr': args.lr_w_theta if train_w_theta else 0},
+            {'params': theta_a, 'weight_decay': 0., 'lr': args.lr_a_theta if train_a_theta else 0},
+            {'params': skip, 'weight_decay': 0, 'lr': 0},
+        ], momentum=args.momentum, nesterov=True)
+    elif args.optimizer.lower() == 'radam':
+        optimizer = RAdam([
+            {'params': weight, 'weight_decay': args.decay, 'lr': args.lr  if train_weight else 0},
+            {'params': quant, 'weight_decay': 0., 'lr': args.lr_quant if train_quant else 0},
+            {'params': bnbias, 'weight_decay': 0., 'lr': args.lr_bn if train_bnbias else 0},
+            {'params': theta_w, 'weight_decay': 0., 'lr': args.lr_w_theta if train_w_theta else 0},
+            {'params': theta_a, 'weight_decay': 0., 'lr': args.lr_a_theta if train_a_theta else 0},
+            {'params': skip, 'weight_decay': 0, 'lr': 0},
+        ],)
+    else:
+        raise ValueError
     return optimizer
 
 
@@ -451,12 +469,17 @@ def train(epoch, phase=None):
     
     end = t0 = time.time()
     for batch_idx, (inputs, targets) in enumerate(train_loader):
+        ###### DEBUG LINE START ######
         #if batch_idx > args.stop_step:
         #    break
-        tau_p = tau
-        tau = temp_func((epoch - 1) * len(train_loader) + batch_idx)
-        if tau_p != tau:
-            set_tau(QuantOps, model, tau)
+        ###### DEBUG LINE END ######
+        if (epoch > args.gumbel_epochs) and args.tau_end:
+            pass
+        else:
+            tau_p = tau
+            tau = temp_func((epoch - 1) * len(train_loader) + batch_idx)
+            if tau_p != tau:
+                set_tau(QuantOps, model, tau)
         '''
         if args.lb_mode and args.alternate:
             if batch_idx % 1000 == 0: # learning weight
@@ -478,14 +501,14 @@ def train(epoch, phase=None):
         bitops = get_bitops(model)
 
 
-        loss = criterion(outputs, targets)
-        eval_acc_loss.update(loss.item(), inputs.size(0))
+        loss_acc = criterion(outputs, targets)
+        eval_acc_loss.update(loss_acc.item(), inputs.size(0))
         
         if args.lb_mode and optimizer.param_groups[3]['lr'] != 0 :#(epoch-1) % (args.w_ep + args.t_ep) >= args.w_ep:
             #if not isinstance(bitops, (float, int)):
             #    bitops = bitops.mean()
-            loss_bitops = F.relu((bitops - bitops_target)/bitops_target * alpha).reshape(torch.Size([]))
-            loss += loss_bitops 
+            loss_bitops = F.relu((bitops - bitops_target)/bitops_target ).reshape(torch.Size([]))
+            loss = loss_acc + loss_bitops * alpha
             #loss = loss_bitops
             eval_bitops_loss.update(loss_bitops.item(), inputs.size(0))
 
@@ -507,6 +530,15 @@ def train(epoch, phase=None):
                 eval_acc_loss.avg, eval_bitops_loss.avg if optimizer.param_groups[3]['lr'] !=0 else 0, 
                 top1.avg, top5.avg,
                 data_time - end, model_time - data_time)
+            
+            wandb.log({
+                'train_acc1': acc1.item(),
+                'train_acc5': acc5.item(),
+                'train_loss_acc': loss_acc.item(), 
+                'train_loss_bitops': loss_bitops.item(),
+                'tau': tau,
+                }
+            )
             if args.cooltime and epoch != end_epoch:
                 print(f'> [sleep] {args.cooltime}s for cooling GPUs.. ', end='', flush=True)
                 time.sleep(args.cooltime)
@@ -552,6 +584,7 @@ def train(epoch, phase=None):
         
     t1 = time.time()
     logging.info(f'epoch time: {t1-t0:.3f} s')
+    
 
 
 def eval(epoch):
@@ -565,20 +598,22 @@ def eval(epoch):
 
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(val_loader):
+            ###### DEBUG LINE START ######
             #if batch_idx > args.stop_step:
             #    break
+            ###### DEBUG LINE END ######
             inputs, targets = inputs.to(device), targets.to(device)
 
             outputs = model(inputs)
-            loss = criterion(outputs, targets)
+            loss_acc = criterion(outputs, targets)
             bitops = get_bitops(model)
-            eval_acc_loss.update(loss.item(), inputs.size(0))
+            eval_acc_loss.update(loss_acc.item(), inputs.size(0))
 
             if args.lb_mode:
                 #if not isinstance(bitops, (float, int)):
                 #    bitops = bitops.mean()
-                loss_bitops = F.relu((bitops - bitops_target)/bitops_target * alpha).reshape(torch.Size([]))
-                loss += loss_bitops 
+                loss_bitops = F.relu((bitops - bitops_target)/bitops_target).reshape(torch.Size([]))
+                loss = loss_acc + loss_bitops * alpha
                 eval_bitops_loss.update(loss_bitops.item(), inputs.size(0))
                 if (batch_idx) % (args.log_interval*5) == 0:
                     logging.info(f'bitops_target: {bitops_target}')
@@ -598,7 +633,13 @@ def eval(epoch):
                     print(f'> [sleep] {args.cooltime}s for cooling GPUs.. ', end='')
                     time.sleep(args.cooltime)
                     print('done.')
-
+            wandb.log({
+                'eval_acc1': acc1.item(),
+                'eval_acc5': acc5.item(),
+                'eval_loss_acc': loss_acc.item(), 
+                'eval_loss_bitops': loss_bitops.item(),
+                }
+            )
         logging.info('L_acc: %.4f | L_bitops: %.3f | top1.avg: %.3f%% | top5.avg: %.3f%%' \
                     % (eval_acc_loss.avg, eval_bitops_loss.avg*1e-9, top1.avg, top5.avg))
         
@@ -628,12 +669,15 @@ if __name__ == '__main__':
                                         args.save, args.exp)
         
         for epoch in range(last_epoch+1, end_epoch+1):
+            if args.gumbel_epochs+1 == epoch:
+                remove_gumbel(QuantOps, model)
+
             alpha, string = get_alpha(args.alpha_init, args.alpha_target, args.epochs, epoch, args.alpha_type)
+            wandb.log({'alpha': alpha})
             logging.info(string)
-            if args.tau_type == "exp_cyclic":
-                pass
-            else:
-                tau, string = get_tau(args.tau_init, args.tau_target, args.epochs, epoch, args.tau_type)
+
+            if (args.gumbel_epochs < epoch) and args.tau_end:
+                tau, string = get_tau(args.tau_init, args.tau_target, args.epochs-args.gumbel_epochs, epoch-args.gumbel_epochs, 'linear')
                 logging.info(string)
                 set_tau(QuantOps, model, tau)
 
@@ -641,6 +685,6 @@ if __name__ == '__main__':
             train(epoch, phase='Search')
             eval(epoch)
             scheduler.step()
-
+            
             
     logging.info('Best accuracy : {:.3f} %'.format(best_acc))
